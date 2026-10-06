@@ -1,0 +1,11 @@
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
+
+# Versiones parcheadas de dependencias transitivas con vulnerabilidades.
+# (Mismos valores que "pnpm.overrides" de package.json, que leen pnpm 9/10.)
+overrides:
+  "next>postcss": "^8.5.29"
+  "@supabase/realtime-js>ws": "^8.22.0"
+  "@supabase/supabase-js>@supabase/auth-js": "^2.70.0"
+  "mercadopago>uuid": "^11.1.1"
