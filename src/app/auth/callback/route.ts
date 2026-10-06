@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
+import { createClient as createAdminClient } from "@/lib/supabase/admin-client"
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
@@ -13,14 +14,22 @@ export async function GET(request: Request) {
     if (!error) {
       const user = data.session?.user
       if (user) {
-        const { error: insertError } = await supabase.from("users").insert({
-          id: user.id,
-          email: user.email,
-          name:
-            user.user_metadata?.full_name ??
-            user.user_metadata?.name ??
-            "Sin nombre",
-        })
+        // El perfil se crea con service role (la tabla users ya no permite
+        // INSERT desde el cliente: evita que alguien se asigne role = admin).
+        // El rol NUNCA se toma del cliente: queda el default (customer).
+        const { error: insertError } = await createAdminClient()
+          .from("users")
+          .upsert(
+            {
+              id: user.id,
+              email: user.email,
+              name:
+                user.user_metadata?.full_name ??
+                user.user_metadata?.name ??
+                "Sin nombre",
+            },
+            { onConflict: "id", ignoreDuplicates: true }
+          )
         if (insertError) {
           console.error(
             "Error al insertar/actualizar el usuario:",

@@ -45,7 +45,9 @@ export async function updateSession(request: NextRequest) {
 
   // Si hay usuario, obtener su rol desde la base de datos (solo si es necesario)
   let userRole: string | null = null
-  const needsRoleCheck = pathname.includes("/dashboard")
+  const isDashboardRoute =
+    pathname === "/dashboard" || pathname.startsWith("/dashboard/")
+  const needsRoleCheck = isDashboardRoute
 
   if (user && needsRoleCheck) {
     const { data: userData } = await supabase
@@ -58,7 +60,7 @@ export async function updateSession(request: NextRequest) {
   }
 
   // Validación para rutas de dashboard: requiere autenticación y rol admin
-  if (pathname.includes("/dashboard")) {
+  if (isDashboardRoute) {
     if (!user) {
       const url = request.nextUrl.clone()
       url.pathname = "/login"

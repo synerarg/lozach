@@ -1,187 +1,83 @@
-import * as React from "react"
+import { SITE_URL } from "@/lib/config/site"
 import {
-  Body,
-  Button,
-  Container,
-  Head,
-  Heading,
-  Hr,
-  Html,
-  Link,
-  Preview,
-  Section,
-  Text,
-} from "@react-email/components"
+  EmailButton,
+  EmailHeading,
+  EmailHero,
+  EmailLayout,
+  EmailParagraph,
+  EmailSection,
+  EmailSteps,
+  isHttpUrl,
+} from "@/components/email-templates/email-layout"
 
-interface NewsletterSubscriptionEmailProps {
-  userEmail?: string
-  websiteName?: string
+export interface NewsletterSubscriptionEmailProps {
+  userEmail: string
+  /** Link al sitio (por defecto, el de la marca). */
   websiteUrl?: string
-  unsubscribeUrl?: string
+  /** Link real de baja del newsletter. */
+  unsubscribeUrl: string
 }
 
 export const NewsletterSubscriptionEmail = ({
   userEmail,
-  websiteName = "Lozach",
-  websiteUrl = "https://lozachurban.store",
-  unsubscribeUrl = "https://lozachurban.store/unsubscribe",
+  websiteUrl,
+  unsubscribeUrl,
 }: NewsletterSubscriptionEmailProps) => {
-  const currentYear = new Date().getFullYear()
+  const shopUrl = isHttpUrl(websiteUrl) ? websiteUrl.trim() : SITE_URL
 
   return (
-    <Html>
-      <Head />
-      <Preview>¡Gracias por suscribirte a nuestro newsletter!</Preview>
-      <Body style={main}>
-        <Container style={container}>
-          <Section style={logoContainer}>
-            <Link href={websiteUrl}>
-              <Heading as="h1" style={logo}>
-                {websiteName}
-              </Heading>
-            </Link>
-          </Section>
+    <EmailLayout
+      preview="¡Ya sos parte de Lozach! Te vamos a contar primero las novedades."
+      unsubscribeUrl={unsubscribeUrl}
+      footerNote={`Recibís este mail porque ${userEmail} se suscribió al newsletter de Lozach.`}
+    >
+      <EmailHero
+        tone="success"
+        badge="Newsletter"
+        title="¡Bienvenido a Lozach!"
+        subtitle="Gracias por sumarte. Ya estás en la lista."
+      />
 
-          <Section style={content}>
-            <Heading as="h2" style={heading}>
-              ¡Bienvenido a nuestro newsletter!
-            </Heading>
+      <EmailSection padding="28px 24px 0 24px">
+        <EmailParagraph>
+          Te suscribiste con <strong>{userEmail}</strong>. A partir de ahora
+          vas a recibir en tu bandeja las novedades de la marca, antes que en
+          cualquier otro lado.
+        </EmailParagraph>
+      </EmailSection>
 
-            <Text style={paragraph}>Hola {userEmail},</Text>
+      <EmailSection padding="20px 24px 0 24px">
+        <EmailHeading>Qué vas a recibir</EmailHeading>
+        <EmailSteps
+          marker="check"
+          steps={[
+            {
+              title: "Lanzamientos y nuevas colecciones",
+              description: "Te enterás primero de lo que llega.",
+            },
+            {
+              title: "Ofertas y beneficios para suscriptores",
+              description: "Promos que no vas a encontrar en otro lado.",
+            },
+            {
+              title: "Sin spam",
+              description: "Te escribimos solo cuando hay algo que vale la pena.",
+            },
+          ]}
+        />
+      </EmailSection>
 
-            <Text style={paragraph}>
-              ¡Gracias por suscribirte a nuestro newsletter! Estamos emocionados
-              de tenerte como parte de nuestra comunidad.
-            </Text>
+      <EmailSection padding="12px 24px 0 24px">
+        <EmailButton href={shopUrl}>Ir a la tienda</EmailButton>
+      </EmailSection>
 
-            <Text style={paragraph}>
-              A partir de ahora, recibirás actualizaciones de nuestro contenido
-              más reciente, noticias, consejos y ofertas exclusivas directamente
-              en tu bandeja de entrada.
-            </Text>
-
-            <Section style={buttonContainer}>
-              <Button style={button} href={websiteUrl}>
-                Visitar Nuestro Sitio
-              </Button>
-            </Section>
-
-            <Text style={paragraph}>
-              Si tienes alguna pregunta o sugerencia, no dudes en responder a
-              este correo.
-            </Text>
-
-            <Text style={paragraph}>
-              ¡Saludos!
-              <br />
-              El equipo de {websiteName}
-            </Text>
-          </Section>
-
-          <Hr style={hr} />
-
-          <Section style={footer}>
-            <Text style={footerText}>
-              © {currentYear} {websiteName}. Todos los derechos reservados.
-            </Text>
-            <Text style={footerText}>
-              Recibiste este email porque te suscribiste a nuestro newsletter.
-            </Text>
-            <Text style={footerText}>
-              <Link href={unsubscribeUrl} style={footerLink}>
-                Cancelar suscripción
-              </Link>
-            </Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+      <EmailSection padding="24px 24px 32px 24px" align="center">
+        <EmailParagraph small muted align="center" spacing="0">
+          ¿Dudas o sugerencias? Respondé este mail y te leemos.
+        </EmailParagraph>
+      </EmailSection>
+    </EmailLayout>
   )
 }
 
 export default NewsletterSubscriptionEmail
-
-// Estilos
-const main = {
-  backgroundColor: "#f9f9f9",
-  fontFamily:
-    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif',
-}
-
-const container = {
-  margin: "0 auto",
-  padding: "20px 0",
-  maxWidth: "600px",
-}
-
-const logoContainer = {
-  padding: "20px",
-  textAlign: "center" as const,
-}
-
-const logo = {
-  color: "#3b82f6",
-  fontSize: "32px",
-  fontWeight: "bold",
-  textDecoration: "none",
-  textAlign: "center" as const,
-  margin: "0",
-}
-
-const content = {
-  backgroundColor: "#ffffff",
-  padding: "30px",
-  borderRadius: "5px",
-  boxShadow: "0 2px 5px rgba(0, 0, 0, 0.05)",
-}
-
-const heading = {
-  fontSize: "24px",
-  fontWeight: "bold",
-  color: "#333",
-  marginBottom: "20px",
-}
-
-const paragraph = {
-  fontSize: "16px",
-  lineHeight: "1.5",
-  color: "#4b5563",
-  margin: "16px 0",
-}
-
-const buttonContainer = {
-  textAlign: "center" as const,
-  margin: "30px 0",
-}
-
-const button = {
-  backgroundColor: "#3b82f6",
-  borderRadius: "5px",
-  color: "#fff",
-  fontSize: "16px",
-  fontWeight: "bold",
-  textDecoration: "none",
-  textAlign: "center" as const,
-  padding: "12px 24px",
-}
-
-const hr = {
-  borderColor: "#e5e7eb",
-  margin: "30px 0",
-}
-
-const footer = {
-  textAlign: "center" as const,
-  padding: "0 30px",
-}
-
-const footerText = {
-  fontSize: "14px",
-  color: "#6b7280",
-  margin: "8px 0",
-}
-
-const footerLink = {
-  color: "#6b7280",
-  textDecoration: "underline",
-}

@@ -76,6 +76,9 @@ export const STATUS_RANK: Record<ShippingStatus, number> = {
 
 const productService = new ProductService()
 
+// Sin timeout, un Correo Argentino lento deja colgados el checkout y el webhook.
+const REQUEST_TIMEOUT_MS = 12_000
+
 const PROVINCE_CODES: Record<string, string> = {
   salta: "A",
   "provincia de buenos aires": "B",
@@ -390,20 +393,14 @@ export class CorreoArgentinoService {
               record.trackingId ||
               record.trackingCode ||
               record.shippingId ||
-              record.shipmentId ||
-              record.number ||
-              record.id
+              record.shipmentId
           ) || null
       }
 
       if (!trackingUrl) {
         trackingUrl =
-          getString(
-            record.trackingUrl ||
-              record.url ||
-              record.labelUrl ||
-              record.label ||
-              record.pdf
+          getHttpsUrl(
+            record.trackingUrl || record.url || record.labelUrl
           ) || null
       }
     }
@@ -530,7 +527,7 @@ export class CorreoArgentinoService {
   ) {
     const totalItems = Math.max(
       1,
-      items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
+      items.reduce((sum, item) => sum + Math.min(Number(item.quantity || 0), 100), 0)
     )
     const baseWeight = Number(
       process.env.CORREO_ARGENTINO_DEFAULT_WEIGHT_GRAMS || 500
@@ -882,9 +879,10 @@ export class CorreoArgentinoService {
       },
       body: "{}",
       cache: "no-store",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
 
-    const payload = (await response.json()) as TokenResponse
+    const payload = (await response.json().catch(() => ({}))) as TokenResponse
 
     if (!response.ok || !payload.token) {
       throw new Error("No se pudo obtener el token de Correo Argentino.")
@@ -919,16 +917,23 @@ export class CorreoArgentinoService {
       },
       body: init.body ? JSON.stringify(init.body) : undefined,
       cache: "no-store",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
 
     const rawText = await response.text()
-    const payload = rawText ? (JSON.parse(rawText) as T) : ({} as T)
 
     if (!response.ok) {
-      throw new Error(rawText || `Error de Correo Argentino (${response.status})`)
+      throw new Error(
+        rawText?.slice(0, 500) ||
+          `Error de Correo Argentino (${response.status})`
+      )
     }
 
-    return payload
+    try {
+      return (rawText ? JSON.parse(rawText) : {}) as T
+    } catch {
+      throw new Error("Correo Argentino devolvió una respuesta inválida.")
+    }
   }
 }
 
@@ -994,11 +999,22 @@ function mapTrackingTextToStatus(text: string): ShippingStatus | null {
     return null
   }
 
+  if (/(devolu|returned|cancelad|caduca|rechaz)/.test(normalized)) {
+    return "cancelled"
+  }
+
+  // "No entregado", "intento de entrega fallido", "ausente" NO son una entrega
+  // ni una cancelación: el paquete sigue en camino y se reintenta.
+  if (
+    /(no entregad|sin entregar|no se pudo entregar|no fue entregad|intento de entrega|entrega fallida|no pudo ser entregad|ausente)/.test(
+      normalized
+    )
+  ) {
+    return null
+  }
+
   if (/(entregad|delivered)/.test(normalized)) {
     return "delivered"
-  }
-  if (/(devolu|returned|cancelad|caduca|fallid|rechaz)/.test(normalized)) {
-    return "cancelled"
   }
   if (
     /(distribuci|reparto|en camino|transit|despach|planta|clasificac)/.test(
@@ -1041,6 +1057,12 @@ function getString(value: unknown): string {
   }
 
   return ""
+}
+
+/** URLs que vienen de la API externa: solo https (se muestran como links en mails/dashboard). */
+function getHttpsUrl(value: unknown): string {
+  const url = getString(value)
+  return url.startsWith("https://") ? url : ""
 }
 
 function getNumber(value: unknown): number | null {

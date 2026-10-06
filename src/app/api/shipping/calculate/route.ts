@@ -1,6 +1,8 @@
 import { CorreoArgentinoService } from "@/services/shipping/correo-argentino-service"
 import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { MAX_CART_LINES, MAX_ITEM_QUANTITY } from "@/lib/config/site"
+import { getClientIp, rateLimit } from "@/lib/security/rate-limit"
 
 const service = new CorreoArgentinoService()
 
@@ -9,14 +11,27 @@ const schema = z.object({
     .array(
       z.object({
         id: z.number().optional(),
-        quantity: z.number().int().positive(),
+        quantity: z.number().int().positive().max(MAX_ITEM_QUANTITY),
       })
     )
-    .min(1),
+    .min(1)
+    .max(MAX_CART_LINES),
   postalCode: z.string().trim().regex(/^\d{4,8}$/),
 })
 
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(`ship-calc:${getClientIp(request)}`, {
+    limit: 30,
+    windowMs: 60_000,
+  })
+
+  if (!limited.ok) {
+    return NextResponse.json(
+      { success: false, message: "Demasiadas consultas. Probá de nuevo en un momento." },
+      { status: 429, headers: { "Retry-After": String(limited.retryAfterSeconds) } }
+    )
+  }
+
   try {
     const body = await request.json()
     const parsed = schema.safeParse(body)
@@ -40,11 +55,11 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(quote)
   } catch (error) {
+    console.error("[shipping:calculate]", error)
     return NextResponse.json(
       {
         success: false,
-        message:
-          error instanceof Error ? error.message : "No se pudo cotizar el envío.",
+        message: "No se pudo cotizar el envío.",
       },
       { status: 500 }
     )

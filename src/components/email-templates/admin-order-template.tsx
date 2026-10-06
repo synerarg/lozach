@@ -1,27 +1,74 @@
-import { AdminOrderNotificationBody } from "@/types/email/email"
-import { getPaymentTypeLabel } from "@/lib/utils/payment-utils"
+import { Link } from "@react-email/components"
 import {
-  Body,
-  Container,
-  Head,
-  Heading,
-  Html,
-  Preview,
-  Section,
-  Text,
-} from "@react-email/components"
+  AdminOrderEmailVariant,
+  AdminOrderNotificationBody,
+} from "@/types/email/email"
+import { getPaymentTypeLabel } from "@/lib/utils/payment-utils"
+import { dashboardOrdersUrl, orderShortId } from "@/lib/config/site"
+import {
+  EmailButton,
+  EmailCallout,
+  EmailHeading,
+  EmailHero,
+  EmailInfoCard,
+  EmailItem,
+  EmailItemsTable,
+  EmailLayout,
+  EmailSection,
+  EmailTone,
+  EmailTotalRow,
+  EmailTotals,
+  emailColors,
+  formatMoney,
+  isHttpsUrl,
+} from "./email-layout"
 
-const formatMoney = (amount: number, currency: string) =>
-  new Intl.NumberFormat("es-AR", {
-    style: "currency",
-    currency,
-  }).format(amount)
+interface VariantCopy {
+  tone: EmailTone
+  badge: string
+  title: string
+  preview: (shortId: string, total: string, customer: string) => string
+}
 
-const shippingMethodLabels: Record<string, string> = {
+const VARIANTS: Record<AdminOrderEmailVariant, VariantCopy> = {
+  sale_confirmed: {
+    tone: "success",
+    badge: "Venta confirmada",
+    title: "Venta confirmada — preparar pedido",
+    preview: (id, total, customer) =>
+      `Venta confirmada #${id} · ${total} · ${customer}`,
+  },
+  transfer_proof_received: {
+    tone: "warning",
+    badge: "Revisar comprobante",
+    title: "Comprobante recibido — revisar y aprobar",
+    preview: (id, total, customer) =>
+      `Comprobante recibido #${id} · ${total} · ${customer}`,
+  },
+  cash_pickup_reserved: {
+    tone: "info",
+    badge: "Cobrar en efectivo",
+    title: "Pedido a retirar y cobrar en efectivo",
+    preview: (id, total, customer) =>
+      `Retiro + efectivo #${id} · ${total} · ${customer}`,
+  },
+}
+
+const SHIPPING_METHOD_LABELS: Record<string, string> = {
   home: "Envío a domicilio",
   branch: "Sucursal Correo Argentino",
   express: "Envío express",
   store: "Retiro en tienda",
+}
+
+const PAYMENT_STATUS_LABELS: Record<string, string> = {
+  approved: "Aprobado",
+  pending: "Pendiente",
+  in_process: "En proceso",
+  rejected: "Rechazado",
+  cancelled: "Cancelado",
+  refunded: "Reembolsado",
+  charged_back: "Contracargo",
 }
 
 export default function AdminOrderNotificationEmail({
@@ -30,143 +77,209 @@ export default function AdminOrderNotificationEmail({
   order,
   orderItems,
   shipping,
+  variant = "sale_confirmed",
+  proofUrl,
 }: AdminOrderNotificationBody) {
-  const previewText = `Nueva orden ${order.collection_status} #${order.id.slice(
-    0,
-    8
-  )}`
+  const copy = VARIANTS[variant]
+  const shortId = orderShortId(order.id)
+  const total = formatMoney(order.total_amount, order.currency)
   const shippingAmount = shipping?.shipping_cost || 0
   const discountAmount = Math.max(
     0,
     order.subtotal + shippingAmount - order.total_amount
   )
+  const safeProofUrl =
+    variant === "transfer_proof_received" && isHttpsUrl(proofUrl)
+      ? proofUrl.trim()
+      : null
+  const paymentStatus = order.collection_status || "pending"
+  const phone = order.phone || shipping?.phone || "—"
+
+  const items: EmailItem[] = orderItems.map((item) => ({
+    name: item.product_name,
+    quantity: item.quantity,
+    unitPrice: item.unit_price,
+    color: item.color,
+    size: item.size,
+    details: item.sku ? [`SKU: ${item.sku}`] : [],
+  }))
+
+  const totalsRows: EmailTotalRow[] = [
+    { label: "Subtotal", value: formatMoney(order.subtotal, order.currency) },
+    {
+      label: "Envío",
+      value:
+        shippingAmount > 0
+          ? formatMoney(shippingAmount, order.currency)
+          : "Sin cargo",
+    },
+  ]
+  if (discountAmount > 0) {
+    totalsRows.push({
+      label: "Descuento",
+      value: `-${formatMoney(discountAmount, order.currency)}`,
+      positive: true,
+    })
+  }
+
+  const detailLines = (shipping?.details || "")
+    .split("|")
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const shippingRows = !shipping
+    ? [{ label: "Envío", value: "Sin datos de envío" }]
+    : shipping.shipping_method === "store"
+      ? [
+          {
+            label: "Envío",
+            value: SHIPPING_METHOD_LABELS.store,
+          },
+        ]
+      : [
+          {
+            label: "Método",
+            value:
+              SHIPPING_METHOD_LABELS[shipping.shipping_method] ??
+              shipping.shipping_method,
+          },
+          ...(shipping.shipping_method === "branch"
+            ? [
+                {
+                  label: "Sucursal",
+                  value: detailLines.length ? (
+                    <>
+                      {detailLines.map((line, i) => (
+                        <span key={i}>
+                          {line}
+                          {i < detailLines.length - 1 ? <br /> : null}
+                        </span>
+                      ))}
+                    </>
+                  ) : (
+                    "—"
+                  ),
+                },
+              ]
+            : []),
+          {
+            label:
+              shipping.shipping_method === "branch"
+                ? "Domicilio del cliente"
+                : "Dirección",
+            value: `${shipping.address}, ${shipping.city}, ${shipping.state} (CP ${shipping.postal_code})`,
+          },
+          ...(shipping.shipping_method !== "branch" && shipping.details
+            ? [{ label: "Detalles", value: shipping.details }]
+            : []),
+        ]
 
   return (
-    <Html>
-      <Head />
-      <Preview>{previewText}</Preview>
-      <Body style={main}>
-        <Container style={container}>
-          <Heading style={heading}>Nueva orden recibida</Heading>
+    <EmailLayout preview={copy.preview(shortId, total, customerName)}>
+      <EmailHero
+        tone={copy.tone}
+        badge={copy.badge}
+        title={copy.title}
+        subtitle={`#${shortId} · ${total}`}
+      />
 
-          <Section style={section}>
-            <Text style={label}>Orden</Text>
-            <Text style={value}>#{order.id.slice(0, 8)}</Text>
-            <Text style={label}>Estado de pago</Text>
-            <Text style={value}>{order.collection_status || "pending"}</Text>
-            <Text style={label}>Método de pago</Text>
-            <Text style={value}>{getPaymentTypeLabel(order.payment_type)}</Text>
-            {discountAmount > 0 && (
-              <>
-                <Text style={label}>Descuento</Text>
-                <Text style={value}>
-                  -{formatMoney(discountAmount, order.currency)}
-                </Text>
-              </>
-            )}
-            <Text style={label}>Total</Text>
-            <Text style={value}>
-              {formatMoney(order.total_amount, order.currency)}
-            </Text>
-          </Section>
+      {/* Lo accionable, arriba */}
+      {variant === "cash_pickup_reserved" ? (
+        <EmailSection padding="24px 24px 0 24px">
+          <EmailCallout tone="info" title="Cobrar al retirar">
+            El cliente paga <strong>{total}</strong> en efectivo cuando pase por
+            la tienda. Dejá el pedido listo para entregar.
+          </EmailCallout>
+        </EmailSection>
+      ) : null}
+      {variant === "transfer_proof_received" ? (
+        <EmailSection padding="24px 24px 0 24px">
+          <EmailCallout tone="warning" title="Falta tu aprobación">
+            {safeProofUrl
+              ? "Revisá el comprobante y aprobá o rechazá el pago desde el dashboard."
+              : "No pudimos adjuntar el enlace del comprobante: revisalo desde el dashboard."}
+          </EmailCallout>
+        </EmailSection>
+      ) : null}
+      <EmailSection padding="18px 24px 0 24px">
+        {safeProofUrl ? (
+          <EmailButton href={safeProofUrl} tone="warning">
+            Ver comprobante
+          </EmailButton>
+        ) : null}
+        <EmailButton
+          href={dashboardOrdersUrl()}
+          variant={safeProofUrl ? "outline" : "solid"}
+        >
+          Abrir en el dashboard
+        </EmailButton>
+      </EmailSection>
 
-          <Section style={section}>
-            <Text style={label}>Cliente</Text>
-            <Text style={value}>{customerName}</Text>
-            <Text style={value}>{customerEmail}</Text>
-            <Text style={value}>{order.phone}</Text>
-          </Section>
-
-          <Section style={section}>
-            <Text style={label}>Productos</Text>
-            {orderItems.map((item) => (
-              <Text key={item.id} style={itemText}>
-                {item.quantity} x {item.product_name} | Color: {item.color} |
-                Talle: {item.size} | SKU: {item.sku}
-              </Text>
-            ))}
-          </Section>
-
-          <Section style={section}>
-            <Text style={label}>Envío</Text>
-            {!shipping ? (
-              <Text style={value}>Sin datos de entrega asociados.</Text>
-            ) : (
-              <>
-                <Text style={value}>
-                  Método:{" "}
-                  {shippingMethodLabels[shipping.shipping_method] ||
-                    shipping.shipping_method}
-                </Text>
-                <Text style={value}>
-                  Costo: {formatMoney(shipping.shipping_cost, order.currency)}
-                </Text>
-                {shipping.shipping_method === "store" ? (
-                  <Text style={value}>Retiro en tienda, sin despacho externo.</Text>
+      <EmailSection padding="28px 24px 0 24px">
+        <EmailHeading level={3}>Cliente</EmailHeading>
+        <EmailInfoCard
+          rows={[
+            { label: "Nombre", value: customerName },
+            {
+              label: "Email",
+              value: (
+                <Link
+                  href={`mailto:${customerEmail}`}
+                  style={{ color: emailColors.ink }}
+                >
+                  {customerEmail}
+                </Link>
+              ),
+            },
+            {
+              label: "Teléfono",
+              value:
+                phone === "—" ? (
+                  phone
                 ) : (
-                  <>
-                    <Text style={value}>{shipping.address}</Text>
-                    {!!shipping.details && (
-                      <Text style={value}>{shipping.details}</Text>
-                    )}
-                    <Text style={value}>
-                      {shipping.city}, {shipping.state} {shipping.postal_code}
-                    </Text>
-                    <Text style={value}>Tel: {shipping.phone}</Text>
-                    <Text style={value}>DNI/CUIT: {shipping.identifier}</Text>
-                  </>
-                )}
-              </>
-            )}
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+                  <Link
+                    href={`tel:${phone.replace(/[^\d+]/g, "")}`}
+                    style={{ color: emailColors.ink }}
+                  >
+                    {phone}
+                  </Link>
+                ),
+            },
+            ...(shipping
+              ? [{ label: "DNI/CUIT", value: String(shipping.identifier) }]
+              : []),
+          ]}
+        />
+      </EmailSection>
+
+      <EmailSection padding="28px 24px 0 24px">
+        <EmailHeading level={3}>Pedido y pago</EmailHeading>
+        <EmailInfoCard
+          rows={[
+            { label: "Pedido", value: `#${shortId}` },
+            {
+              label: "Estado del pago",
+              value: PAYMENT_STATUS_LABELS[paymentStatus] ?? paymentStatus,
+            },
+            {
+              label: "Método de pago",
+              value: getPaymentTypeLabel(order.payment_type),
+            },
+            { label: "Total", value: total },
+          ]}
+        />
+      </EmailSection>
+
+      <EmailSection padding="28px 24px 0 24px">
+        <EmailHeading level={3}>Envío</EmailHeading>
+        <EmailInfoCard rows={shippingRows} />
+      </EmailSection>
+
+      <EmailSection padding="28px 24px 32px 24px">
+        <EmailHeading level={3}>Productos</EmailHeading>
+        <EmailItemsTable items={items} currency={order.currency} />
+        <EmailTotals rows={totalsRows} total={total} />
+      </EmailSection>
+    </EmailLayout>
   )
-}
-
-const main = {
-  backgroundColor: "#f5f5f5",
-  fontFamily:
-    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-  padding: "24px 0",
-}
-
-const container = {
-  margin: "0 auto",
-  maxWidth: "640px",
-  backgroundColor: "#ffffff",
-  padding: "24px",
-}
-
-const heading = {
-  fontSize: "28px",
-  margin: "0 0 24px",
-  color: "#111111",
-}
-
-const section = {
-  marginBottom: "20px",
-  padding: "16px",
-  border: "1px solid #e5e5e5",
-}
-
-const label = {
-  fontSize: "13px",
-  fontWeight: "700",
-  color: "#666666",
-  margin: "0 0 8px",
-  textTransform: "uppercase" as const,
-}
-
-const value = {
-  fontSize: "15px",
-  color: "#111111",
-  margin: "0 0 6px",
-}
-
-const itemText = {
-  fontSize: "14px",
-  color: "#111111",
-  margin: "0 0 8px",
 }

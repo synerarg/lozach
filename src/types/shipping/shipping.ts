@@ -33,6 +33,10 @@ export interface Shipping {
   last_tracking_status?: string | null
   in_transit_email_sent?: boolean
   delivered_email_sent?: boolean
+  import_attempts?: number
+  import_error?: string | null
+  import_alert_sent?: boolean
+  ready_for_pickup_email_sent?: boolean
 }
 
 export interface CreateShippingValues {
@@ -74,6 +78,10 @@ export interface UpdateShippingValues {
   last_tracking_status?: string | null
   in_transit_email_sent?: boolean
   delivered_email_sent?: boolean
+  import_attempts?: number
+  import_error?: string | null
+  import_alert_sent?: boolean
+  ready_for_pickup_email_sent?: boolean
 }
 
 export interface ShippingQuote {

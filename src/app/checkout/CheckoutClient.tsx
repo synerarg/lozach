@@ -20,6 +20,7 @@ import {
   CASH_STORE_DISCOUNT_PERCENT_LABEL,
   CASH_STORE_PAYMENT_TYPE,
   MERCADO_PAGO_PAYMENT_TYPE,
+  TRANSFER_PAYMENT_WINDOW_MS,
   calculateBankTransferDiscount,
   calculateCashStoreDiscount,
 } from "@/lib/utils/payment-utils"
@@ -87,6 +88,45 @@ const formatCurrency = (amount: number) =>
     maximumFractionDigits: 0,
   }).format(amount)
 
+const FIELD_LABELS: Record<string, string> = {
+  identifier: "DNI / CUIT",
+  address: "Dirección",
+  details: "Detalles",
+  postal_code: "Código postal",
+  city: "Ciudad",
+  state: "Provincia",
+  phone: "Teléfono",
+  agency_code: "Sucursal",
+  shipping_method: "Método de entrega",
+}
+
+/** Convierte los fieldErrors del servidor en líneas legibles ("Teléfono: mensaje"). */
+const flattenFieldErrors = (
+  fieldErrors?: Record<string, string[]>
+): string[] => {
+  if (!fieldErrors) return []
+
+  const lines: string[] = []
+  for (const [field, messages] of Object.entries(fieldErrors)) {
+    const label = FIELD_LABELS[field]
+    for (const message of messages) {
+      lines.push(label ? `${label}: ${message}` : message)
+    }
+  }
+  return Array.from(new Set(lines))
+}
+
+const formatTransferWindow = (ms: number) => {
+  const minutes = Math.max(1, Math.round(ms / 60000))
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60
+    return hours === 1 ? "1 hora" : `${hours} horas`
+  }
+  return `${minutes} minutos`
+}
+
+type SubmitError = { message: string; details: string[] }
+
 const mapAddressToForm = (address: Address) => ({
   identifier: String(address.identifier),
   address: address.address,
@@ -116,6 +156,8 @@ export default function CheckoutClient({
   const [saveInfo, setSaveInfo] = useState(false)
   const [useSavedAddress, setUseSavedAddress] = useState(Boolean(address))
   const [isLoading, setIsLoading] = useState(false)
+  const [isRedirecting, setIsRedirecting] = useState(false)
+  const [submitError, setSubmitError] = useState<SubmitError | null>(null)
   const [isQuoting, setIsQuoting] = useState(false)
   const [isLoadingAgencies, setIsLoadingAgencies] = useState(false)
   const [quote, setQuote] = useState<ShippingQuote | null>(null)
@@ -137,6 +179,20 @@ export default function CheckoutClient({
       })),
     [cartItems]
   )
+
+  // Si el usuario vuelve con "Atrás" desde Mercado Pago (bfcache), el botón no
+  // debe quedar trabado en "Procesando".
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        isSubmittingRef.current = false
+        setIsLoading(false)
+        setIsRedirecting(false)
+      }
+    }
+    window.addEventListener("pageshow", onPageShow)
+    return () => window.removeEventListener("pageshow", onPageShow)
+  }, [])
 
   useEffect(() => {
     setFormData((prev) => ({
@@ -394,27 +450,41 @@ export default function CheckoutClient({
     }))
   }
 
+  const reportSubmitError = (message: string, details: string[] = []) => {
+    setSubmitError({ message, details })
+    toast.error(message)
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
     if (isSubmittingRef.current) return
+
+    setSubmitError(null)
+
     if (method === "branch" && !formData.agency_code) {
-      toast.error("Seleccioná una sucursal de Correo Argentino.")
+      reportSubmitError("Seleccioná una sucursal de Correo Argentino.")
       return
     }
     if (method !== "store" && shippingCost === null) {
-      toast.error("Completá el código postal para calcular el envío.")
+      reportSubmitError("Completá el código postal para calcular el envío.")
       return
     }
+    // Es una cotización: el servidor recalcula el costo final al crear la orden.
     const finalShippingCost = shippingCost ?? 0
 
     isSubmittingRef.current = true
     setIsLoading(true)
+    // Si ya estamos navegando (MP / pantalla de pago) el botón sigue deshabilitado.
+    let isNavigating = false
 
     try {
       const validated = PaymentSchema.safeParse(formData)
       if (!validated.success) {
-        validated.error.issues.forEach((issue) => toast.error(issue.message))
+        const details = Array.from(
+          new Set(validated.error.issues.map((issue) => issue.message))
+        )
+        reportSubmitError("Revisá los datos del formulario.", details)
         return
       }
 
@@ -446,20 +516,20 @@ export default function CheckoutClient({
         )
 
         if (order.success && order.data) {
+          isNavigating = true
+          setIsRedirecting(true)
           clearCart()
           router.push(order.data.redirect_url)
           return
         }
 
-        toast.error(order.message || "No se pudo crear el pedido.")
+        reportSubmitError(order.message || "No se pudo crear el pedido.")
         return
       }
 
       if (paymentMethod === CASH_STORE_PAYMENT_TYPE) {
         if (method !== "store") {
-          toast.error(
-            "El pago en efectivo requiere retiro en tienda."
-          )
+          reportSubmitError("El pago en efectivo requiere retiro en tienda.")
           return
         }
 
@@ -468,12 +538,14 @@ export default function CheckoutClient({
         )
 
         if (order.success && order.data) {
+          isNavigating = true
+          setIsRedirecting(true)
           clearCart()
           router.push(order.data.redirect_url)
           return
         }
 
-        toast.error(order.message || "No se pudo crear el pedido.")
+        reportSubmitError(order.message || "No se pudo crear el pedido.")
         return
       }
 
@@ -482,27 +554,55 @@ export default function CheckoutClient({
       )
 
       if (preference.success && preference.data) {
+        isNavigating = true
         router.push(preference.data.init_point as string)
       } else {
-        toast.error(preference.message || "No se pudo crear la preferencia.")
+        reportSubmitError(
+          preference.message || "No se pudo crear la preferencia de pago."
+        )
       }
     } catch (error) {
       if (error instanceof AppActionException) {
-        if (
-          error.statusCode === 401 &&
-          error.userMessage?.includes("sesión iniciada")
-        ) {
+        if (error.statusCode === 401) {
+          isNavigating = true
           toast.error("Tu sesión expiró. Iniciá sesión para continuar.")
-          router.push("/login")
+          router.push("/login?redirect=%2Fcheckout&reason=checkout")
           return
         }
 
-        toast.error(error.message)
+        // El servidor ya devuelve el mensaje listo para mostrar (ej. "El talle
+        // elegido de X ya no está disponible"): se muestra tal cual.
+        reportSubmitError(error.message, flattenFieldErrors(error.fieldErrors))
+        return
       }
+
+      console.error("[checkout] submit", error)
+      reportSubmitError(
+        "No pudimos procesar tu pedido. Revisá tu conexión e intentá de nuevo."
+      )
     } finally {
-      setIsLoading(false)
-      isSubmittingRef.current = false
+      if (!isNavigating) {
+        setIsLoading(false)
+        isSubmittingRef.current = false
+      }
     }
+  }
+
+  if (cartItems.length === 0 && isRedirecting) {
+    return (
+      <div
+        role="status"
+        className="min-h-screen py-24 justify-center items-center flex"
+      >
+        <div className="flex flex-col items-center gap-3 text-center px-4">
+          <Loader2 className="h-8 w-8 animate-spin text-gray-700" />
+          <p className="font-medium text-gray-900">Pedido creado</p>
+          <p className="text-sm text-gray-600">
+            Te llevamos a la pantalla de pago…
+          </p>
+        </div>
+      </div>
+    )
   }
 
   if (cartItems.length === 0) {
@@ -674,8 +774,9 @@ export default function CheckoutClient({
                   )}
 
                   {quoteError && method !== "store" && (
-                    <p className="text-sm text-amber-700">
-                      {quoteError}. Se usará una tarifa estimada.
+                    <p className="text-sm text-amber-700" role="alert">
+                      {quoteError.replace(/[.\s]+$/, "")}. Revisá el código postal
+                      para poder continuar.
                     </p>
                   )}
                 </CardContent>
@@ -846,8 +947,9 @@ export default function CheckoutClient({
                   {paymentMethod === BANK_TRANSFER_PAYMENT_TYPE && (
                     <p className="text-sm text-gray-600">
                       El descuento se aplica sobre los productos. El envío se
-                      suma aparte. Tendrás 20 minutos para enviar el
-                      comprobante.
+                      suma aparte. Tendrás{" "}
+                      {formatTransferWindow(TRANSFER_PAYMENT_WINDOW_MS)} para
+                      enviar el comprobante.
                     </p>
                   )}
                   {paymentMethod === CASH_STORE_PAYMENT_TYPE && (
@@ -939,6 +1041,13 @@ export default function CheckoutClient({
                   </div>
                 </div>
 
+                {method !== "store" && (
+                  <p className="text-xs text-gray-500">
+                    El costo de envío es una cotización: el valor final se
+                    confirma al pagar.
+                  </p>
+                )}
+
                 {method !== "store" && quote && (
                   <div className="rounded-lg bg-gray-50 p-4 text-sm text-gray-600">
                     <p>
@@ -955,9 +1064,26 @@ export default function CheckoutClient({
                   </div>
                 )}
 
+                {submitError && (
+                  <div
+                    role="alert"
+                    className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800"
+                  >
+                    <p className="font-medium">{submitError.message}</p>
+                    {submitError.details.length > 0 && (
+                      <ul className="mt-2 list-disc space-y-1 pl-5">
+                        {submitError.details.map((detail) => (
+                          <li key={detail}>{detail}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
                 <Button
                   type="submit"
                   className="w-full h-12"
+                  aria-busy={isLoading}
                   disabled={
                     isLoading ||
                     isQuoting ||

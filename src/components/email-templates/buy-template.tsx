@@ -1,67 +1,127 @@
+import { Link, Text } from "@react-email/components"
 import { EmailBody } from "@/types/email/email"
-import { getPaymentTypeLabel } from "@/lib/utils/payment-utils"
-import { ShippingStatus } from "@/types/shipping/shipping"
+import { Shipping, ShippingStatus } from "@/types/shipping/shipping"
 import {
-  Body,
-  Container,
-  Column,
-  Head,
-  Heading,
-  Hr,
-  Html,
-  Img,
-  Link,
-  Preview,
-  Row,
-  Section,
-  Text,
-} from "@react-email/components"
+  BANK_TRANSFER_DISCOUNT_PERCENT_LABEL,
+  BANK_TRANSFER_PAYMENT_TYPE,
+  CASH_STORE_DISCOUNT_PERCENT_LABEL,
+  CASH_STORE_PAYMENT_TYPE,
+  getPaymentTypeLabel,
+} from "@/lib/utils/payment-utils"
+import {
+  STORE_PICKUP_INFO,
+  orderShortId,
+  orderUrl,
+} from "@/lib/config/site"
+import {
+  EmailButton,
+  EmailCallout,
+  EmailHeading,
+  EmailHero,
+  EmailInfoCard,
+  EmailItem,
+  EmailItemsTable,
+  EmailLayout,
+  EmailParagraph,
+  EmailSection,
+  EmailStatusBadge,
+  EmailSteps,
+  EmailTone,
+  EmailTotals,
+  EmailTotalRow,
+  emailColors,
+  emailFonts,
+  formatEmailDate,
+  formatMoney,
+} from "./email-layout"
 
-const formatMoney = (amount: number, currency: string) => {
-  return new Intl.NumberFormat("es-AR", {
-    style: "currency",
-    currency: currency,
-  }).format(amount)
+const SHIPPING_METHOD_LABELS: Record<string, string> = {
+  home: "Envío a domicilio",
+  branch: "Retiro en sucursal de Correo Argentino",
+  express: "Envío express",
+  store: "Retiro en tienda",
 }
 
-const formatDate = (dateString: string) => {
-  return new Date(dateString).toLocaleDateString("es-AR", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  })
-}
-
-const getShippingMethodLabel = (method: string) => {
-  const labels: Record<string, string> = {
-    home: "Envío a domicilio",
-    branch: "Retiro en sucursal Correo Argentino",
-    express: "Envío express",
-    store: "Retiro en tienda",
+const SHIPPING_STATUS: Record<ShippingStatus, { label: string; tone: EmailTone }> =
+  {
+    draft: { label: "En preparación", tone: "neutral" },
+    ready: { label: "Listo para despachar", tone: "info" },
+    shipped: { label: "Enviado", tone: "info" },
+    delivered: { label: "Entregado", tone: "success" },
+    cancelled: { label: "Cancelado", tone: "danger" },
   }
-  return labels[method] || method
-}
 
-const getStatusBadgeColor = (status: ShippingStatus) => {
-  const colors: Record<ShippingStatus, string> = {
-    draft: "#6B7280",
-    ready: "#3B82F6",
-    shipped: "#10B981",
-    delivered: "#059669",
-    cancelled: "#EF4444",
-  }
-  return colors[status] || "#6B7280"
-}
+function ShippingDetails({ shipping }: { shipping: Shipping }) {
+  const addressLine = `${shipping.city}, ${shipping.state} (CP ${shipping.postal_code})`
+  const detailLines = (shipping.details || "")
+    .split("|")
+    .map((line) => line.trim())
+    .filter(Boolean)
 
-const getStatusLabel = (status: ShippingStatus) => {
-  const labels: Record<ShippingStatus, string> = {
-    draft: "Borrador",
-    ready: "Listo para enviar",
-    shipped: "Enviado",
-    delivered: "Entregado",
-    cancelled: "Cancelado",
+  if (shipping.shipping_method === "store") {
+    return (
+      <EmailCallout tone="neutral" title="Retiro en tienda">
+        {STORE_PICKUP_INFO} Acordate de llevar tu DNI y el número de pedido.
+      </EmailCallout>
+    )
   }
-  return labels[status] || status
+
+  if (shipping.shipping_method === "branch") {
+    return (
+      <EmailInfoCard
+        layout="stacked"
+        rows={[
+          {
+            label: "Sucursal de retiro",
+            value: (
+              <>
+                {detailLines.length
+                  ? detailLines.map((line, i) => (
+                      <span key={i}>
+                        {line}
+                        {i < detailLines.length - 1 ? <br /> : null}
+                      </span>
+                    ))
+                  : "Sucursal de Correo Argentino"}
+              </>
+            ),
+          },
+          { label: "Quién retira", value: `DNI/CUIT ${shipping.identifier}` },
+          { label: "Teléfono", value: shipping.phone },
+          {
+            label: "Domicilio del destinatario",
+            value: `${shipping.address}, ${addressLine}`,
+          },
+        ]}
+      />
+    )
+  }
+
+  return (
+    <EmailInfoCard
+      layout="stacked"
+      rows={[
+        {
+          label: "Dirección de entrega",
+          value: (
+            <>
+              {shipping.address}
+              <br />
+              {addressLine}
+              {shipping.details ? (
+                <>
+                  <br />
+                  {shipping.details}
+                </>
+              ) : null}
+            </>
+          ),
+        },
+        { label: "Teléfono", value: shipping.phone },
+        { label: "DNI/CUIT", value: String(shipping.identifier) },
+      ]}
+    />
+  )
 }
 
 export default function OrderConfirmationEmail({
@@ -71,615 +131,208 @@ export default function OrderConfirmationEmail({
   orderItems,
   shipping,
 }: EmailBody) {
-  const previewText = `Gracias por tu compra, ${name}. Tu pedido #${order.id.slice(
-    0,
-    8
-  )} ha sido confirmado.`
+  const shortId = orderShortId(order.id)
   const shippingAmount = shipping?.shipping_cost || 0
   const discountAmount = Math.max(
     0,
     order.subtotal + shippingAmount - order.total_amount
   )
+  const isStorePickup = shipping?.shipping_method === "store"
+  const isCashStore = order.payment_type === CASH_STORE_PAYMENT_TYPE
+  const createdAt = formatEmailDate(order.created_at)
 
-  const logoUrl = "https://lozachurban.store/logo-big.png"
+  const items: EmailItem[] = orderItems.map((item) => {
+    const product = buyedProducts.find((p) => p.id === item.product_id)
+    return {
+      name: item.product_name,
+      quantity: item.quantity,
+      unitPrice: item.unit_price,
+      color: item.color,
+      size: item.size,
+      imageUrl: product?.image_url ?? null,
+      details: [
+        product?.fabric ? `Tela: ${product.fabric}` : "",
+        item.sku ? `SKU: ${item.sku}` : "",
+      ].filter(Boolean),
+    }
+  })
+
+  const discountLabel =
+    order.payment_type === BANK_TRANSFER_PAYMENT_TYPE
+      ? `Descuento por transferencia (${BANK_TRANSFER_DISCOUNT_PERCENT_LABEL})`
+      : isCashStore
+        ? `Descuento por pago en efectivo (${CASH_STORE_DISCOUNT_PERCENT_LABEL})`
+        : "Descuento"
+
+  const totalsRows: EmailTotalRow[] = [
+    {
+      label: "Subtotal",
+      value: formatMoney(order.subtotal, order.currency),
+    },
+    {
+      label: isStorePickup ? "Envío (retiro en tienda)" : "Envío",
+      value:
+        shippingAmount > 0
+          ? formatMoney(shippingAmount, order.currency)
+          : "Sin cargo",
+    },
+  ]
+  if (discountAmount > 0) {
+    totalsRows.push({
+      label: discountLabel,
+      value: `-${formatMoney(discountAmount, order.currency)}`,
+      positive: true,
+    })
+  }
+
+  const steps = isStorePickup
+    ? [
+        {
+          title: "Preparamos tu pedido",
+          description: "Lo dejamos listo para que lo retires.",
+        },
+        {
+          title: "Te avisamos cuando esté listo",
+          description: "Recibís un mail con los detalles para retirarlo.",
+        },
+        {
+          title: "Retirás en tienda",
+          description: "Llevá tu DNI y el número de pedido.",
+        },
+      ]
+    : [
+        {
+          title: "Preparamos tu pedido",
+          description: "Lo armamos con cuidado y lo dejamos listo.",
+        },
+        {
+          title: "Lo despachamos con Correo Argentino",
+          description: "Te mandamos el número de seguimiento por mail.",
+        },
+        {
+          title: "Entrega",
+          description:
+            shipping?.shipping_method === "branch"
+              ? "Lo retirás en la sucursal que elegiste."
+              : "Lo recibís en la dirección que nos indicaste.",
+        },
+      ]
+
+  const shippingStatus = shipping ? SHIPPING_STATUS[shipping.shipping_status] : null
 
   return (
-    <Html>
-      <Head />
-      <Preview>{previewText}</Preview>
-      <Body style={main}>
-        <Container style={container}>
-          {/* Header with Logo */}
-          <Section style={header}>
-            <Img
-              src={logoUrl}
-              alt="Lozach"
-              width="200"
-              height="70"
-              style={logo}
-            />
-          </Section>
+    <EmailLayout
+      preview={
+        isCashStore
+          ? `${name}, reservamos tu pedido #${shortId}. Pagás en efectivo al retirar.`
+          : `¡Gracias por tu compra, ${name}! Tu pedido #${shortId} está confirmado.`
+      }
+    >
+      <EmailHero
+        tone={isCashStore ? "warning" : "success"}
+        badge={isCashStore ? "Pedido reservado" : "Pago confirmado"}
+        title={isCashStore ? "¡Reservamos tu pedido!" : "¡Gracias por tu compra!"}
+        subtitle={`Pedido #${shortId}${createdAt ? ` · ${createdAt}` : ""}`}
+      />
 
-          <Hr style={divider} />
+      <EmailSection padding="28px 24px 0 24px">
+        <EmailParagraph>Hola {name},</EmailParagraph>
+        <EmailParagraph spacing="0 0 18px 0">
+          {isCashStore
+            ? "Tu pedido quedó reservado. Cuando esté listo te avisamos para que pases a retirarlo y pagarlo en efectivo."
+            : "Recibimos tu pago y tu pedido ya está confirmado. Estamos preparando todo; apenas salga te mandamos el seguimiento por mail."}
+        </EmailParagraph>
+        <EmailButton href={orderUrl()}>Ver mi pedido</EmailButton>
+      </EmailSection>
 
-          {/* Dark Hero Section */}
-          <Section style={hero}>
-            <Heading style={heroHeading}>¡Gracias por tu compra!</Heading>
-            <Text style={heroSubheading}>Tu pedido ha sido confirmado.</Text>
-          </Section>
+      {isCashStore ? (
+        <EmailSection>
+          <EmailCallout tone="warning" title="Pagás al retirar">
+            Total a pagar en efectivo en la tienda:{" "}
+            <strong>{formatMoney(order.total_amount, order.currency)}</strong>
+          </EmailCallout>
+        </EmailSection>
+      ) : null}
 
-          {/* Greeting */}
-          <Section style={content}>
-            <Text style={greeting}>Hola {name},</Text>
-            <Text style={paragraph}>
-              Gracias por comprar en Lozach. Estamos emocionados de enviarte tu
-              pedido. Recibirás un email de confirmación de envío con detalles
-              de seguimiento una vez que tus artículos estén en camino.
+      <EmailSection padding="32px 24px 0 24px">
+        <EmailHeading>Qué sigue</EmailHeading>
+        <EmailSteps steps={steps} tone="neutral" />
+      </EmailSection>
+
+      <EmailSection padding="16px 24px 0 24px">
+        <EmailHeading>Resumen del pedido</EmailHeading>
+        <EmailInfoCard
+          rows={[
+            { label: "Pedido", value: `#${shortId}` },
+            ...(createdAt ? [{ label: "Fecha", value: createdAt }] : []),
+            {
+              label: "Método de pago",
+              value: getPaymentTypeLabel(order.payment_type),
+            },
+          ]}
+        />
+      </EmailSection>
+
+      <EmailSection padding="32px 24px 0 24px">
+        <EmailHeading>Tus productos</EmailHeading>
+        <EmailItemsTable items={items} currency={order.currency} />
+        <EmailTotals
+          rows={totalsRows}
+          total={formatMoney(order.total_amount, order.currency)}
+        />
+      </EmailSection>
+
+      <EmailSection padding="32px 24px 0 24px">
+        <EmailHeading>
+          {isStorePickup ? "Retiro" : "Información de envío"}
+        </EmailHeading>
+        {!shipping ? (
+          <EmailParagraph muted small>
+            No encontramos información de entrega asociada a este pedido. Si
+            necesitás ayuda, respondé este mail.
+          </EmailParagraph>
+        ) : (
+          <>
+            <Text
+              style={{
+                margin: "0 0 12px 0",
+                fontFamily: emailFonts.sans,
+                fontSize: "15px",
+                lineHeight: "24px",
+                color: emailColors.text,
+              }}
+            >
+              <strong style={{ color: emailColors.ink }}>
+                {SHIPPING_METHOD_LABELS[shipping.shipping_method] ??
+                  shipping.shipping_method}
+              </strong>
+              {isStorePickup ? "" : " · Correo Argentino"}
+              {shippingStatus ? (
+                <>
+                  {"  "}
+                  <EmailStatusBadge tone={shippingStatus.tone}>
+                    {shippingStatus.label}
+                  </EmailStatusBadge>
+                </>
+              ) : null}
             </Text>
-          </Section>
+            <ShippingDetails shipping={shipping} />
+          </>
+        )}
+      </EmailSection>
 
-          {/* Order Summary Card */}
-          <Section style={card}>
-            <Heading as="h2" style={cardHeading}>
-              Resumen del Pedido
-            </Heading>
-
-            <Row style={summaryRow}>
-              <Column>
-                <Text style={summaryLabel}>ID del Pedido</Text>
-                <Text style={summaryValue}>#{order.id.slice(0, 8)}</Text>
-              </Column>
-              <Column>
-                <Text style={summaryLabel}>Fecha</Text>
-                <Text style={summaryValue}>{formatDate(order.created_at)}</Text>
-              </Column>
-            </Row>
-
-            <Row style={summaryRow}>
-              <Column>
-                <Text style={summaryLabel}>Método de Pago</Text>
-                <Text style={summaryValue}>
-                  {getPaymentTypeLabel(order.payment_type)}
-                </Text>
-              </Column>
-            </Row>
-
-            <Hr style={cardDivider} />
-
-            <Row style={totalRow}>
-              <Column>
-                <Text style={totalLabel}>Subtotal</Text>
-              </Column>
-              <Column align="right">
-                <Text style={totalValue}>
-                  {formatMoney(order.subtotal, order.currency)}
-                </Text>
-              </Column>
-            </Row>
-
-            <Row style={totalRow}>
-              <Column>
-                <Text style={totalLabel}>Envío</Text>
-              </Column>
-              <Column align="right">
-                <Text style={totalValue}>
-                  {formatMoney(shippingAmount, order.currency)}
-                </Text>
-              </Column>
-            </Row>
-
-            {discountAmount > 0 && (
-              <Row style={totalRow}>
-                <Column>
-                  <Text style={discountLabel}>Descuento transferencia</Text>
-                </Column>
-                <Column align="right">
-                  <Text style={discountValue}>
-                    -{formatMoney(discountAmount, order.currency)}
-                  </Text>
-                </Column>
-              </Row>
-            )}
-
-            <Hr style={cardDivider} />
-
-            <Row style={totalRow}>
-              <Column>
-                <Text style={totalLabelBold}>Total</Text>
-              </Column>
-              <Column align="right">
-                <Text style={totalValueBold}>
-                  {formatMoney(order.total_amount, order.currency)}
-                </Text>
-              </Column>
-            </Row>
-          </Section>
-
-          {/* Product List */}
-          <Section style={card}>
-            <Heading as="h2" style={cardHeading}>
-              Artículos Pedidos
-            </Heading>
-
-            {orderItems.map((item, index) => {
-              const product = buyedProducts[index]
-
-              return (
-                <div key={item.id}>
-                  {index > 0 && <Hr style={productDivider} />}
-                  <Row style={productRow}>
-                    <Column style={productImageColumn}>
-                      {product?.image_url ? (
-                        <Img
-                          src={product.image_url}
-                          alt={item.product_name}
-                          width="80"
-                          height="80"
-                          style={productImage}
-                        />
-                      ) : (
-                        <div style={productImagePlaceholder}>
-                          <Text style={placeholderText}>Sin imagen</Text>
-                        </div>
-                      )}
-                    </Column>
-                    <Column style={productDetailsColumn}>
-                      <Text style={productName}>{item.product_name}</Text>
-                      <Text style={productDetail}>Color: {item.color}</Text>
-                      <Text style={productDetail}>
-                        Tela: {product?.fabric || "N/A"}
-                      </Text>
-                      <Text style={productDetail}>Talle: {item.size}</Text>
-                      <Text style={productDetail}>SKU: {item.sku}</Text>
-                    </Column>
-                    <Column style={productPriceColumn} align="right">
-                      <Text style={productPrice}>
-                        {formatMoney(item.unit_price, order.currency)}
-                      </Text>
-                      <Text style={productQuantity}>Cant: {item.quantity}</Text>
-                    </Column>
-                  </Row>
-                </div>
-              )
-            })}
-          </Section>
-
-          {/* Shipping Information */}
-          <Section style={card}>
-            <Heading as="h2" style={cardHeading}>
-              Información de Envío
-            </Heading>
-
-            {!shipping ? (
-              <Text style={addressText}>
-                No encontramos información de entrega asociada a esta orden.
-              </Text>
-            ) : (
-              <>
-            <Row style={shippingRow}>
-              <Column>
-                <Text style={shippingLabel}>Método</Text>
-                <Text style={shippingValue}>
-                  {getShippingMethodLabel(shipping.shipping_method)}
-                </Text>
-              </Column>
-              <Column>
-                <Text style={shippingLabel}>Proveedor</Text>
-                <Text style={shippingValue}>
-                  {shipping.shipping_method === "store"
-                    ? "Retiro en tienda"
-                    : shipping.provider === "CA"
-                      ? "Correo Argentino"
-                      : "CA"}
-                </Text>
-              </Column>
-            </Row>
-
-            <Row style={shippingRow}>
-              <Column>
-                <Text style={shippingLabel}>Estado</Text>
-                <div
-                  style={{
-                    ...statusBadge,
-                    backgroundColor: getStatusBadgeColor(
-                      shipping.shipping_status
-                    ),
-                  }}
-                >
-                  <Text style={statusBadgeText}>
-                    {getStatusLabel(shipping.shipping_status)}
-                  </Text>
-                </div>
-              </Column>
-            </Row>
-
-            <Hr style={cardDivider} />
-
-            {shipping.shipping_method === "store" ? (
-              <div>
-                <Text style={addressHeading}>Retiro en tienda</Text>
-                <Text style={addressText}>
-                  Tu pedido estará listo para retirar en nuestra tienda. Te
-                  enviaremos una notificación cuando esté listo. Por favor trae
-                  una identificación válida y tu número de pedido.
-                </Text>
-              </div>
-            ) : shipping.shipping_method === "branch" ? (
-              <div>
-                <Text style={addressHeading}>Retiro en sucursal</Text>
-                <Text style={addressText}>{shipping.details}</Text>
-                <Text style={addressText}>
-                  Dirección del destinatario: {shipping.address}
-                </Text>
-                <Text style={addressText}>
-                  {shipping.city}, {shipping.state} {shipping.postal_code}
-                </Text>
-                <Text style={addressText}>Teléfono: {shipping.phone}</Text>
-                <Text style={addressText}>
-                  <strong>DNI/CUIT:</strong> {shipping.identifier}
-                </Text>
-              </div>
-            ) : (
-              <div>
-                <Text style={addressHeading}>Dirección de Entrega</Text>
-                <Text style={addressText}>{shipping.address}</Text>
-                {shipping.details && (
-                  <Text style={addressText}>{shipping.details}</Text>
-                )}
-                <Text style={addressText}>
-                  {shipping.city}, {shipping.state} {shipping.postal_code}
-                </Text>
-                <Text style={addressText}>Teléfono: {shipping.phone}</Text>
-                <Text style={addressText}>
-                  <strong>DNI/CUIT:</strong> {shipping.identifier}
-                </Text>
-              </div>
-            )}
-              </>
-            )}
-          </Section>
-
-          {/* Footer */}
-          <Section style={footer}>
-            <Text style={footerText}>
-              ¿Necesitas ayuda? Responde a este email o contacta a nuestro
-              equipo de soporte.
-            </Text>
-
-            <Row style={socialRow}>
-              <Column align="center">
-                <Link
-                  href="https://instagram.com/lozachurban"
-                  style={socialLink}
-                >
-                  Instagram
-                </Link>
-                <Text style={footerSeparator}>•</Text>
-                <Link href="mailto:lozacharg@gmail.com" style={socialLink}>
-                  Soporte por Email
-                </Link>
-              </Column>
-            </Row>
-
-            <Text style={copyright}>
-              © {new Date().getFullYear()} Lozach. Todos los derechos
-              reservados.
-            </Text>
-          </Section>
-        </Container>
-      </Body>
-    </Html>
+      <EmailSection padding="28px 24px 32px 24px" align="center">
+        <EmailParagraph small muted align="center" spacing="0">
+          ¿Algo no está bien? Respondé este mail o mirá el estado en{" "}
+          <Link
+            href={orderUrl()}
+            style={{ color: emailColors.ink, fontWeight: 600 }}
+          >
+            Mis pedidos
+          </Link>
+          .
+        </EmailParagraph>
+      </EmailSection>
+    </EmailLayout>
   )
-}
-
-// Styles
-const main = {
-  backgroundColor: "#ffffff",
-  fontFamily:
-    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-}
-
-const container = {
-  margin: "0 auto",
-  maxWidth: "600px",
-  width: "100%",
-}
-
-const header = {
-  padding: "32px 24px",
-  textAlign: "center" as const,
-}
-
-const logo = {
-  margin: "0 auto",
-  display: "block",
-}
-
-const divider = {
-  borderColor: "#E5E5E5",
-  margin: "0",
-}
-
-const hero = {
-  backgroundColor: "#0F0F0F",
-  padding: "48px 24px",
-  textAlign: "center" as const,
-}
-
-const heroHeading = {
-  color: "#FFFFFF",
-  fontSize: "32px",
-  fontWeight: "700",
-  lineHeight: "1.2",
-  margin: "0 0 12px 0",
-}
-
-const heroSubheading = {
-  color: "#D1D5DB",
-  fontSize: "18px",
-  lineHeight: "1.5",
-  margin: "0",
-}
-
-const content = {
-  padding: "32px 24px",
-  textAlign: "center" as const,
-}
-
-const greeting = {
-  fontSize: "18px",
-  fontWeight: "600",
-  lineHeight: "1.5",
-  margin: "0 0 16px 0",
-  color: "#111111",
-}
-
-const paragraph = {
-  fontSize: "16px",
-  lineHeight: "1.75",
-  margin: "0",
-  color: "#4B5563",
-}
-
-const card = {
-  backgroundColor: "#FFFFFF",
-  border: "1px solid #E5E5E5",
-  borderRadius: "8px",
-  margin: "0 auto 24px auto",
-  padding: "24px",
-  maxWidth: "552px",
-}
-
-const cardHeading = {
-  fontSize: "20px",
-  fontWeight: "600",
-  lineHeight: "1.4",
-  margin: "0 0 20px 0",
-  color: "#111111",
-}
-
-const summaryRow = {
-  marginBottom: "16px",
-}
-
-const summaryLabel = {
-  fontSize: "14px",
-  color: "#6B7280",
-  margin: "0 0 4px 0",
-}
-
-const summaryValue = {
-  fontSize: "16px",
-  color: "#111111",
-  fontWeight: "500",
-  margin: "0",
-}
-
-const cardDivider = {
-  borderColor: "#E5E5E5",
-  margin: "16px 0",
-}
-
-const totalRow = {
-  marginBottom: "8px",
-}
-
-const totalLabel = {
-  fontSize: "15px",
-  color: "#4B5563",
-  margin: "0",
-}
-
-const totalValue = {
-  fontSize: "15px",
-  color: "#111111",
-  margin: "0",
-}
-
-const discountLabel = {
-  fontSize: "15px",
-  color: "#047857",
-  margin: "0",
-}
-
-const discountValue = {
-  fontSize: "15px",
-  color: "#047857",
-  margin: "0",
-}
-
-const totalLabelBold = {
-  fontSize: "16px",
-  fontWeight: "600",
-  color: "#111111",
-  margin: "0",
-}
-
-const totalValueBold = {
-  fontSize: "16px",
-  fontWeight: "600",
-  color: "#111111",
-  margin: "0",
-}
-
-const productRow = {
-  marginBottom: "20px",
-  display: "table",
-  width: "100%",
-}
-
-const productImageColumn = {
-  width: "80px",
-  verticalAlign: "top" as const,
-  paddingRight: "16px",
-  display: "table-cell",
-}
-
-const productImage = {
-  borderRadius: "6px",
-  objectFit: "cover" as const,
-}
-
-const productImagePlaceholder = {
-  width: "80px",
-  height: "80px",
-  backgroundColor: "#F3F4F6",
-  borderRadius: "6px",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-}
-
-const placeholderText = {
-  fontSize: "12px",
-  color: "#9CA3AF",
-  margin: "0",
-}
-
-const productDetailsColumn = {
-  verticalAlign: "top" as const,
-  paddingRight: "12px",
-}
-
-const productName = {
-  fontSize: "16px",
-  fontWeight: "600",
-  color: "#111111",
-  margin: "0 0 8px 0",
-  lineHeight: "1.3",
-}
-
-const productDetail = {
-  fontSize: "14px",
-  color: "#6B7280",
-  margin: "0 0 4px 0",
-  lineHeight: "1.4",
-}
-
-const productPriceColumn = {
-  verticalAlign: "top" as const,
-  width: "auto",
-  minWidth: "80px",
-  whiteSpace: "nowrap" as const,
-}
-
-const productPrice = {
-  fontSize: "16px",
-  fontWeight: "600",
-  color: "#111111",
-  margin: "0 0 4px 0",
-  whiteSpace: "nowrap" as const,
-}
-
-const productQuantity = {
-  fontSize: "14px",
-  color: "#6B7280",
-  margin: "0",
-  lineHeight: "1.4",
-}
-
-const productDivider = {
-  borderColor: "#E5E5E5",
-  margin: "16px 0",
-}
-
-const shippingRow = {
-  marginBottom: "16px",
-}
-
-const shippingLabel = {
-  fontSize: "14px",
-  color: "#6B7280",
-  margin: "0 0 4px 0",
-}
-
-const shippingValue = {
-  fontSize: "16px",
-  color: "#111111",
-  fontWeight: "500",
-  margin: "0",
-}
-
-const statusBadge = {
-  display: "inline-block",
-  padding: "4px 12px",
-  borderRadius: "12px",
-  marginTop: "4px",
-}
-
-const statusBadgeText = {
-  fontSize: "13px",
-  color: "#FFFFFF",
-  fontWeight: "500",
-  margin: "0",
-}
-
-const addressHeading = {
-  fontSize: "15px",
-  fontWeight: "600",
-  color: "#111111",
-  margin: "0 0 12px 0",
-}
-
-const addressText = {
-  fontSize: "15px",
-  color: "#4B5563",
-  lineHeight: "1.6",
-  margin: "0 0 6px 0",
-}
-
-const footer = {
-  padding: "32px 24px",
-  textAlign: "center" as const,
-}
-
-const footerText = {
-  fontSize: "14px",
-  color: "#6B7280",
-  lineHeight: "1.6",
-  margin: "0 0 16px 0",
-}
-
-const socialRow = {
-  marginBottom: "16px",
-}
-
-const socialLink = {
-  color: "#111111",
-  fontSize: "14px",
-  textDecoration: "none",
-  fontWeight: "500",
-}
-
-const footerSeparator = {
-  display: "inline",
-  margin: "0 8px",
-  color: "#D1D5DB",
-  fontSize: "14px",
-}
-
-const copyright = {
-  fontSize: "13px",
-  color: "#9CA3AF",
-  margin: "0",
 }

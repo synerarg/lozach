@@ -1,53 +1,66 @@
 "use server"
 
+import { headers } from "next/headers"
 import { NewsletterSubscriptionSchema } from "@/lib/validations/user-schema"
 import { FormState } from "@/types/types"
-import axios from "axios"
-import { z } from "zod"
 import { SubscribersService } from "@/services/subscribers/subscribers-service"
+import { EmailService } from "@/services/email/email-service"
 import { actionHandler } from "@/lib/handlers/actionHandler"
+import { rateLimit } from "@/lib/security/rate-limit"
+import { verifyUnsubscribeToken } from "@/lib/security/unsubscribe-token"
 
 const subscribersService = new SubscribersService()
+const emailService = new EmailService()
 
 export const newsletterSubscription = async (
-  prevState: FormState,
+  _prevState: FormState,
   formData: FormData
-) => {
+): Promise<FormState> => {
   try {
-    const email = formData.get("email") as string
-
-    const validatedData = NewsletterSubscriptionSchema.safeParse({ email })
-
-    if (!validatedData.success) {
-      return {
-        error: validatedData.error.errors[0].message,
-      }
-    }
-
-    // Crear suscriptor usando el service
-    const createSubscriberResult = await actionHandler(async () => {
-      return await subscribersService.createSubscriber(email)
+    const rawEmail = formData.get("email")
+    const validatedData = NewsletterSubscriptionSchema.safeParse({
+      email: typeof rawEmail === "string" ? rawEmail.trim() : "",
     })
 
-    if (!createSubscriberResult.success) {
+    if (!validatedData.success) {
+      return { error: validatedData.error.errors[0].message }
+    }
+
+    const email = validatedData.data.email.toLowerCase()
+
+    // Frena bots que usan el formulario para inundar casillas ajenas.
+    const requestHeaders = await headers()
+    const ip = requestHeaders.get("x-forwarded-for")?.split(",")[0].trim()
+    const limit = rateLimit(`newsletter:${ip ?? "unknown"}`, {
+      limit: 5,
+      windowMs: 10 * 60 * 1000,
+    })
+
+    if (!limit.ok) {
+      return { error: "Demasiados intentos. Probá de nuevo en unos minutos." }
+    }
+
+    const result = await actionHandler(() =>
+      subscribersService.createSubscriber(email)
+    )
+
+    if (!result.success) {
+      return { error: result.message || "Error al crear el suscriptor" }
+    }
+
+    if (result.data === "already_subscribed") {
       return {
-        error: createSubscriberResult.message || "Error al crear el suscriptor",
+        success: true,
+        message: "¡Ya estabas suscripto/a! Gracias por seguirnos.",
       }
     }
 
-    // Enviar email de confirmación
+    // Email de bienvenida solo al suscriptor (antes pasaba por un endpoint
+    // público que permitía mandar mails a cualquier dirección).
     try {
-      const response = await axios.post("/api/emails", { email })
-
-      if (response.status !== 200) {
-        return {
-          error:
-            "Hubo un error al enviar el email de confirmación. Por favor intente nuevamente.",
-        }
-      }
+      await emailService.sendNewsletterWelcomeEmail(email)
     } catch (emailError) {
-      console.error("Error sending email:", emailError)
-      // No retornamos error aquí porque el suscriptor ya se creó exitosamente
+      console.error("[Newsletter] welcome email error:", emailError)
     }
 
     return {
@@ -55,15 +68,29 @@ export const newsletterSubscription = async (
       message: "Te has suscrito correctamente a nuestro newsletter.",
     }
   } catch (err) {
-    if (err instanceof z.ZodError) {
-      return {
-        error: err.errors[0].message,
-      }
-    }
-
     console.error("Newsletter subscription error:", err)
     return {
       error: "Hubo un error al suscribirse. Por favor intente nuevamente.",
+    }
+  }
+}
+
+export const unsubscribeFromNewsletter = async (
+  email: string,
+  token: string
+): Promise<{ success: boolean; message: string }> => {
+  if (!email || !token || !verifyUnsubscribeToken(email, token)) {
+    return { success: false, message: "El enlace de baja no es válido." }
+  }
+
+  try {
+    await subscribersService.unsubscribe(email)
+    return { success: true, message: "Listo, ya no vas a recibir más mails." }
+  } catch (error) {
+    console.error("[Newsletter] unsubscribe error:", error)
+    return {
+      success: false,
+      message: "No pudimos procesar tu baja. Escribinos y la hacemos a mano.",
     }
   }
 }

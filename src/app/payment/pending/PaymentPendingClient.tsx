@@ -1,443 +1,625 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
-import Link from "next/link"
+import { useEffect, useState } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import {
-  Clock,
-  Package,
-  Home,
-  Upload,
+  Check,
+  FileCheck2,
   Loader2,
-  CheckCircle2,
-  AlertTriangle,
+  Package,
+  RefreshCw,
+  ShoppingBag,
+  Store,
 } from "lucide-react"
-import { toast } from "sonner"
 
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { ClosedOrderView } from "@/components/payment/ClosedOrderView"
+import { CopyButton } from "@/components/payment/CopyButton"
+import { OrderLookupError } from "@/components/payment/OrderLookupError"
 import {
-  BANK_TRANSFER_PAYMENT_TYPE,
-  CASH_STORE_PAYMENT_TYPE,
-  TRANSFER_PAYMENT_WINDOW_MS,
-} from "@/lib/utils/payment-utils"
+  PaymentOrderSummary,
+  SummaryList,
+} from "@/components/payment/PaymentOrderSummary"
+import {
+  PaymentLoadingShell,
+  PaymentStatusShell,
+  ShellButton,
+  ShellLink,
+} from "@/components/payment/PaymentStatusShell"
+import { ProofUploader } from "@/components/payment/ProofUploader"
+import { TransferCountdown } from "@/components/payment/TransferCountdown"
+import {
+  buildLoginHref,
+  cleanReference,
+  formatDateTime,
+  formatMoney,
+  isBankTransferType,
+  isCashStoreType,
+  isUnsettledPaymentStatus,
+  sanitizePaymentId,
+} from "@/components/payment/payment-format"
+import { useOrderSnapshot } from "@/components/payment/useOrderSnapshot"
+import type { OrderPaymentSnapshot } from "@/controllers/payment/payment-controller"
+import { orderShortId, STORE_PICKUP_INFO } from "@/lib/config/site"
+import { cn } from "@/lib/utils"
 
-const formatCurrency = (amount: number) =>
-  new Intl.NumberFormat("es-AR", {
-    style: "currency",
-    currency: "ARS",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(amount)
+/** Polling suave: rápido al principio y cada 15 s hasta ~10 min. */
+const POLL_DELAYS_MS: readonly number[] = [
+  3000,
+  3000,
+  5000,
+  5000,
+  ...Array.from({ length: 40 }, () => 15000),
+]
 
-const formatTimer = (ms: number) => {
-  const total = Math.max(0, Math.floor(ms / 1000))
-  const minutes = Math.floor(total / 60)
-  const seconds = total % 60
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(
-    2,
-    "0"
-  )}`
+function shouldPollPending(snapshot: OrderPaymentSnapshot): boolean {
+  if (!isUnsettledPaymentStatus(snapshot.status)) return false
+  // Transferencia: solo tiene sentido esperar mientras el admin revisa.
+  if (isBankTransferType(snapshot.paymentType)) {
+    return snapshot.proofStatus === "pending_review"
+  }
+  // Efectivo en tienda: lo confirma el admin al cobrar, sin apuro.
+  if (isCashStoreType(snapshot.paymentType)) return false
+  return true
 }
 
-const ACCEPTED_TYPES = "image/png,image/jpeg,image/webp,application/pdf"
-const MAX_BYTES = 10 * 1024 * 1024
+interface BankDetail {
+  label: string
+  value: string
+  copy: boolean
+  mono: boolean
+}
 
-type UploadState = "idle" | "uploading" | "uploaded" | "error"
+const BANK_DETAILS: BankDetail[] = [
+  {
+    label: "Alias",
+    value: process.env.NEXT_PUBLIC_BANK_TRANSFER_ALIAS ?? "",
+    copy: true,
+    mono: true,
+  },
+  {
+    label: "CBU/CVU",
+    value: process.env.NEXT_PUBLIC_BANK_TRANSFER_CBU ?? "",
+    copy: true,
+    mono: true,
+  },
+  {
+    label: "Titular",
+    value: process.env.NEXT_PUBLIC_BANK_TRANSFER_HOLDER ?? "",
+    copy: true,
+    mono: false,
+  },
+  {
+    label: "Banco",
+    value: process.env.NEXT_PUBLIC_BANK_TRANSFER_BANK ?? "",
+    copy: false,
+    mono: false,
+  },
+].filter((detail) => detail.value.trim() !== "")
 
-export default function PaymentPendingClient() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const fileInputRef = useRef<HTMLInputElement>(null)
+/** Los bancos argentinos esperan coma decimal. */
+function formatAmountForCopy(amount: number): string {
+  return Number.isInteger(amount)
+    ? String(amount)
+    : amount.toFixed(2).replace(".", ",")
+}
 
-  const [paymentId, setPaymentId] = useState<string | null>(null)
-  const [now, setNow] = useState<number | null>(null)
-  const [deadline, setDeadline] = useState<number | null>(null)
-  const [uploadState, setUploadState] = useState<UploadState>("idle")
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [uploadError, setUploadError] = useState<string | null>(null)
+type StepState = "done" | "current" | "upcoming"
 
-  const paymentMethod = searchParams.get("payment_method")
-  const externalReference = searchParams.get("external_reference")
-  const amount = Number(searchParams.get("amount"))
-  const isBankTransfer = paymentMethod === BANK_TRANSFER_PAYMENT_TYPE
-  const isCashStore = paymentMethod === CASH_STORE_PAYMENT_TYPE
-
-  const supportEmail =
-    process.env.NEXT_PUBLIC_SUPPORT_EMAIL || "lozacharg@gmail.com"
-
-  const bankDetails = useMemo(
-    () =>
-      [
-        { label: "Alias", value: process.env.NEXT_PUBLIC_BANK_TRANSFER_ALIAS },
-        { label: "CBU/CVU", value: process.env.NEXT_PUBLIC_BANK_TRANSFER_CBU },
-        {
-          label: "Titular",
-          value: process.env.NEXT_PUBLIC_BANK_TRANSFER_HOLDER,
-        },
-        { label: "Banco", value: process.env.NEXT_PUBLIC_BANK_TRANSFER_BANK },
-      ].filter((item): item is { label: string; value: string } =>
-        Boolean(item.value)
-      ),
-    []
+function Step({
+  number,
+  title,
+  state,
+  children,
+}: {
+  number: number
+  title: string
+  state: StepState
+  children?: React.ReactNode
+}) {
+  return (
+    <li className="group relative pb-7 pl-12 last:pb-0">
+      <span
+        className={cn(
+          "absolute left-0 top-0 flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold",
+          state === "done" && "bg-emerald-600 text-white",
+          state === "current" && "bg-neutral-900 text-white",
+          state === "upcoming" &&
+            "border border-neutral-300 bg-white text-neutral-500"
+        )}
+        aria-hidden="true"
+      >
+        {state === "done" ? <Check className="h-4 w-4" /> : number}
+      </span>
+      <span
+        className="absolute bottom-0 left-4 top-9 w-px bg-neutral-200 group-last:hidden"
+        aria-hidden="true"
+      />
+      <h3
+        className={cn(
+          "pt-1 text-base font-semibold",
+          state === "upcoming" ? "text-neutral-500" : "text-neutral-900"
+        )}
+      >
+        <span className="sr-only">
+          {state === "done"
+            ? "Paso completado: "
+            : state === "current"
+              ? "Paso actual: "
+              : "Próximo paso: "}
+        </span>
+        {title}
+      </h3>
+      {children && (
+        <div className="mt-2 space-y-3 text-sm text-neutral-600">
+          {children}
+        </div>
+      )}
+    </li>
   )
+}
 
-  const remainingMs =
-    isBankTransfer && deadline !== null && now !== null
-      ? Math.max(0, deadline - now)
-      : null
-  const isExpired = remainingMs !== null && remainingMs === 0
-  const isCritical =
-    remainingMs !== null && remainingMs > 0 && remainingMs < 5 * 60 * 1000
-
-  useEffect(() => {
-    const id = searchParams.get("payment_id")
-    setPaymentId(id)
-  }, [searchParams])
-
-  useEffect(() => {
-    if (!isBankTransfer) {
-      setDeadline(null)
-      setNow(null)
-      return
-    }
-    const start = Date.now()
-    setDeadline(start + TRANSFER_PAYMENT_WINDOW_MS)
-    setNow(start)
-    const interval = window.setInterval(() => {
-      setNow(Date.now())
-    }, 1000)
-    return () => window.clearInterval(interval)
-  }, [isBankTransfer])
-
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null
-    setUploadError(null)
-    if (!file) {
-      setSelectedFile(null)
-      return
-    }
-    if (file.size > MAX_BYTES) {
-      setUploadError("El archivo supera 10 MB.")
-      setSelectedFile(null)
-      return
-    }
-    setSelectedFile(file)
-  }
-
-  const handleUpload = async () => {
-    if (!selectedFile) {
-      toast.error("Adjuntá el comprobante antes de continuar.")
-      return
-    }
-    if (!externalReference) {
-      toast.error("Falta la referencia de la orden.")
-      return
-    }
-    if (isExpired) {
-      toast.error("El plazo para enviar el comprobante venció.")
-      return
-    }
-
-    setUploadState("uploading")
-    setUploadError(null)
-
-    try {
-      const formData = new FormData()
-      formData.append("external_reference", externalReference)
-      formData.append("file", selectedFile)
-
-      const response = await fetch("/api/payment/transfer-proof", {
-        method: "POST",
-        body: formData,
-      })
-
-      const payload = await response.json().catch(() => null)
-
-      if (!response.ok || !payload?.success) {
-        const message =
-          payload?.message || "No se pudo subir el comprobante."
-        setUploadState("error")
-        setUploadError(message)
-        toast.error(message)
-        return
-      }
-
-      setUploadState("uploaded")
-      toast.success(
-        "¡Comprobante recibido! Vamos a confirmarte por email."
-      )
-
-      window.setTimeout(() => {
-        router.push("/profile/my-orders")
-      }, 1500)
-    } catch (error) {
-      console.error(error)
-      const message =
-        error instanceof Error
-          ? error.message
-          : "No se pudo subir el comprobante."
-      setUploadState("error")
-      setUploadError(message)
-      toast.error(message)
-    }
+function BankDetails() {
+  if (BANK_DETAILS.length === 0) {
+    return (
+      <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+        Los datos bancarios todavía no están cargados en el sitio. Escribinos
+        por mail para coordinar la transferencia.
+      </p>
+    )
   }
 
   return (
-    <div className="min-h-screen py-24 flex items-center justify-center bg-gray-50">
-      <div className="container mx-auto px-4">
-        <div className="max-w-md mx-auto">
-          <Card className="text-center">
-            <CardHeader className="pb-4">
-              <div className="w-16 h-16 mx-auto mb-4 bg-amber-100 rounded-full flex items-center justify-center">
-                <Clock className="h-8 w-8 text-amber-600" />
-              </div>
-              <CardTitle className="text-2xl font-bold text-gray-900">
-                {isBankTransfer
-                  ? "Pedido pendiente por transferencia"
-                  : isCashStore
-                    ? "Pedido reservado para retirar"
-                    : "Pago Pendiente"}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {isBankTransfer ? (
-                <div className="space-y-4 text-left">
-                  <div className="space-y-2 text-center">
-                    <p className="text-gray-600">
-                      Realizá la transferencia y enviá el comprobante para que
-                      podamos reservar tu pedido.
-                    </p>
-                    {Number.isFinite(amount) && amount > 0 && (
-                      <p className="text-2xl font-bold text-gray-900">
-                        {formatCurrency(amount)}
-                      </p>
-                    )}
-                    {externalReference && (
-                      <p className="text-xs text-gray-500">
-                        Referencia:{" "}
-                        <span className="font-mono">
-                          {externalReference}
-                        </span>
-                      </p>
-                    )}
-                  </div>
+    <ul className="divide-y divide-neutral-200 rounded-xl border border-neutral-200 bg-white">
+      {BANK_DETAILS.map((detail) => (
+        <li
+          key={detail.label}
+          className="flex items-center justify-between gap-3 px-3 py-2.5"
+        >
+          <div className="min-w-0">
+            <p className="text-xs text-neutral-600">{detail.label}</p>
+            <p
+              className={cn(
+                "break-all text-sm font-semibold text-neutral-900",
+                detail.mono && "font-mono"
+              )}
+            >
+              {detail.value}
+            </p>
+          </div>
+          {detail.copy && (
+            <CopyButton value={detail.value} label={detail.label} />
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
 
-                  <div
-                    className={`rounded-lg border p-4 text-center ${
-                      isExpired
-                        ? "border-red-200 bg-red-50 text-red-700"
-                        : isCritical
-                          ? "border-amber-300 bg-amber-50 text-amber-800"
-                          : "border-amber-200 bg-amber-50 text-amber-800"
-                    }`}
-                    role="timer"
-                    aria-live="polite"
-                  >
-                    <p className="text-xs uppercase tracking-wide font-medium">
-                      Tiempo restante para enviar el comprobante
-                    </p>
-                    <p className="text-3xl font-mono font-bold tabular-nums mt-1">
-                      {remainingMs === null
-                        ? formatTimer(TRANSFER_PAYMENT_WINDOW_MS)
-                        : formatTimer(remainingMs)}
-                    </p>
-                    <p className="text-xs mt-1">
-                      {isExpired
-                        ? "El plazo venció. Si ya transferiste, escribinos."
-                        : "El pedido se libera si no recibimos el comprobante a tiempo."}
-                    </p>
-                  </div>
+function TransferView({
+  snapshot,
+  externalReference,
+  onUploaded,
+}: {
+  snapshot: OrderPaymentSnapshot
+  externalReference: string
+  onUploaded: () => void
+}) {
+  const [replacing, setReplacing] = useState(false)
 
-                  {bankDetails.length > 0 ? (
-                    <div className="rounded-lg border bg-gray-50 p-4 text-sm">
-                      <p className="mb-3 font-medium text-gray-900">
-                        Datos para transferir
-                      </p>
-                      <div className="space-y-2">
-                        {bankDetails.map((item) => (
-                          <div
-                            key={item.label}
-                            className="flex justify-between gap-4"
-                          >
-                            <span className="text-gray-500">
-                              {item.label}
-                            </span>
-                            <span className="text-right font-medium break-all">
-                              {item.value}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-                      Los datos bancarios todavía no están configurados en el
-                      sitio. Contactanos por email para coordinar la
-                      transferencia.
-                    </div>
-                  )}
+  const isRejected =
+    snapshot.status === "rejected" || snapshot.proofStatus === "rejected"
+  const inReview = !isRejected && snapshot.proofStatus === "pending_review"
+  const showCountdown = !isRejected && !inReview && Boolean(snapshot.expiresAt)
+  const uploadedAt = formatDateTime(snapshot.proofUploadedAt)
 
-                  <div className="rounded-lg border bg-white p-4 space-y-3">
-                    <p className="font-medium text-gray-900 text-sm">
-                      Subí el comprobante
-                    </p>
+  const title = inReview
+    ? "Recibimos tu comprobante"
+    : isRejected
+      ? "No pudimos validar tu comprobante"
+      : "Transferí y subí tu comprobante"
 
-                    {uploadState === "uploaded" ? (
-                      <div className="flex items-start gap-3 rounded-md bg-green-50 border border-green-200 p-3 text-sm text-green-800">
-                        <CheckCircle2 className="h-5 w-5 shrink-0 mt-0.5" />
-                        <div>
-                          <p className="font-medium">¡Comprobante recibido!</p>
-                          <p className="text-xs">
-                            Te avisamos por email cuando se confirme el pago.
-                          </p>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <input
-                          ref={fileInputRef}
-                          type="file"
-                          accept={ACCEPTED_TYPES}
-                          onChange={handleFileChange}
-                          className="hidden"
-                        />
-                        <div className="flex flex-col gap-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            className="w-full justify-center"
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={
-                              uploadState === "uploading" || isExpired
-                            }
-                          >
-                            <Upload className="h-4 w-4 mr-2" />
-                            {selectedFile
-                              ? "Cambiar archivo"
-                              : "Adjuntar comprobante"}
-                          </Button>
-                          {selectedFile && (
-                            <p className="text-xs text-gray-600 truncate">
-                              {selectedFile.name} (
-                              {(selectedFile.size / 1024).toFixed(0)} KB)
-                            </p>
-                          )}
-                          {uploadError && (
-                            <p className="flex items-start gap-2 text-xs text-red-600">
-                              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                              {uploadError}
-                            </p>
-                          )}
-                          <p className="text-xs text-gray-500">
-                            PNG, JPG, WEBP o PDF. Hasta 10 MB.
-                          </p>
-                        </div>
+  const description = inReview
+    ? "Lo estamos revisando. Cuando lo confirmemos te llega un mail y empezamos a preparar tu pedido."
+    : isRejected
+      ? "Revisá el motivo y subí un comprobante nuevo para que podamos confirmar tu pedido."
+      : "Reservamos tu pedido. Seguí estos tres pasos para confirmarlo."
 
-                        <Button
-                          type="button"
-                          className="w-full bg-black hover:bg-black/90 text-white"
-                          onClick={handleUpload}
-                          disabled={
-                            !selectedFile ||
-                            uploadState === "uploading" ||
-                            isExpired
-                          }
-                        >
-                          {uploadState === "uploading" ? (
-                            <span className="flex items-center justify-center gap-2">
-                              Enviando{" "}
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            </span>
-                          ) : (
-                            "Ya transferí"
-                          )}
-                        </Button>
-                      </>
-                    )}
-                  </div>
+  return (
+    <PaymentStatusShell
+      tone={isRejected ? "danger" : "pending"}
+      icon={
+        inReview ? (
+          <FileCheck2 className="h-8 w-8 text-amber-600" />
+        ) : undefined
+      }
+      size="lg"
+      title={title}
+      description={description}
+      summary={
+        <div className="space-y-4">
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-5 text-center">
+            <p className="text-xs font-medium uppercase tracking-wide text-neutral-600">
+              Monto a transferir
+            </p>
+            <p className="mt-1 text-4xl font-bold tabular-nums tracking-tight text-neutral-900 sm:text-5xl">
+              {formatMoney(snapshot.totalAmount, snapshot.currency)}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm text-neutral-600">
+              <span>
+                Pedido{" "}
+                <span className="font-mono font-medium text-neutral-900">
+                  #{orderShortId(snapshot.orderId)}
+                </span>
+              </span>
+              <CopyButton
+                value={formatAmountForCopy(snapshot.totalAmount)}
+                label="monto"
+              />
+            </div>
+          </div>
+          {showCountdown && snapshot.expiresAt && (
+            <TransferCountdown expiresAt={snapshot.expiresAt} />
+          )}
+        </div>
+      }
+      actions={
+        <>
+          <ShellLink href="/profile/my-orders" icon={<Package />}>
+            Ver mis pedidos
+          </ShellLink>
+          <ShellLink
+            href="/products"
+            variant="secondary"
+            icon={<ShoppingBag />}
+          >
+            Seguir comprando
+          </ShellLink>
+        </>
+      }
+    >
+      <ol aria-label="Pasos para completar el pago">
+        <Step
+          number={1}
+          title="Transferí el monto exacto"
+          state={inReview ? "done" : "current"}
+        >
+          {inReview ? (
+            <p>Transferencia realizada.</p>
+          ) : (
+            <>
+              <p>
+                Desde tu home banking o billetera virtual, transferí{" "}
+                <strong className="text-neutral-900">
+                  {formatMoney(snapshot.totalAmount, snapshot.currency)}
+                </strong>{" "}
+                a esta cuenta:
+              </p>
+              <BankDetails />
+            </>
+          )}
+        </Step>
 
-                  <p className="text-center text-xs text-gray-500">
-                    También podés enviar el comprobante a{" "}
-                    <a href={`mailto:${supportEmail}`} className="underline">
-                      {supportEmail}
-                    </a>
-                    .
-                  </p>
-                </div>
-              ) : isCashStore ? (
-                <div className="space-y-3 text-left">
-                  <p className="text-gray-600">
-                    Reservamos tu pedido. Vas a pagar en efectivo cuando lo
-                    retires en la tienda.
-                  </p>
-                  {Number.isFinite(amount) && amount > 0 && (
-                    <p className="text-center text-2xl font-bold text-gray-900">
-                      Total a pagar: {formatCurrency(amount)}
-                    </p>
-                  )}
-                  {externalReference && (
-                    <p className="text-center text-xs text-gray-500">
-                      Referencia:{" "}
-                      <span className="font-mono">{externalReference}</span>
-                    </p>
-                  )}
-                  <p className="text-sm text-gray-600">
-                    Te vamos a confirmar por email los datos de la tienda y el
-                    horario para retirar.
-                  </p>
-                </div>
+        <Step
+          number={2}
+          title={isRejected ? "Subí un comprobante nuevo" : "Subí el comprobante"}
+          state={inReview ? "done" : "current"}
+        >
+          {inReview ? (
+            <>
+              <p className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-900">
+                Comprobante recibido{uploadedAt ? ` el ${uploadedAt}` : ""}. Lo
+                estamos revisando.
+              </p>
+              {replacing ? (
+                <ProofUploader
+                  externalReference={externalReference}
+                  onUploaded={() => {
+                    setReplacing(false)
+                    onUploaded()
+                  }}
+                  submitLabel="Enviar nuevo comprobante"
+                />
               ) : (
-                <div className="space-y-2">
-                  <p className="text-gray-600">
-                    Tu pago está siendo procesado. Esto puede tardar unos
-                    minutos.
-                  </p>
-                  {paymentId && (
-                    <p className="text-sm text-gray-500">
-                      ID de pago:{" "}
-                      <span className="font-mono">{paymentId}</span>
-                    </p>
-                  )}
-                  <p className="text-gray-600">
-                    Te notificaremos por email cuando se confirme tu pago.
+                <button
+                  type="button"
+                  onClick={() => setReplacing(true)}
+                  className="min-h-11 text-sm font-medium text-neutral-900 underline underline-offset-2"
+                >
+                  ¿Te equivocaste de archivo? Subir otro comprobante
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              {isRejected && (
+                <div
+                  role="alert"
+                  className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-900"
+                >
+                  <p className="font-medium">Motivo del rechazo</p>
+                  <p>
+                    {snapshot.proofRejectionReason ||
+                      "El comprobante no pudo validarse."}
                   </p>
                 </div>
               )}
+              <p>
+                Adjuntá la captura o el PDF del comprobante de transferencia.
+              </p>
+              <ProofUploader
+                externalReference={externalReference}
+                onUploaded={onUploaded}
+                submitLabel={
+                  isRejected ? "Enviar nuevo comprobante" : "Enviar comprobante"
+                }
+              />
+            </>
+          )}
+        </Step>
 
-              <div className="space-y-3">
-                <Button
-                  asChild
-                  className="w-full bg-black hover:bg-black/90 text-white"
-                >
-                  <Link href="/profile/my-orders">
-                    <Package className="h-4 w-4 mr-2" />
-                    Ver Mis Pedidos
-                  </Link>
-                </Button>
-                <Button asChild variant="outline" className="w-full">
-                  <Link href="/">
-                    <Home className="h-4 w-4 mr-2" />
-                    Volver al Inicio
-                  </Link>
-                </Button>
-              </div>
+        <Step
+          number={3}
+          title="Te confirmamos"
+          state={inReview ? "current" : "upcoming"}
+        >
+          <p>
+            Revisamos el comprobante y, cuando lo aprobemos, te mandamos un mail
+            con la confirmación. Esta pantalla se actualiza sola.
+          </p>
+        </Step>
+      </ol>
+    </PaymentStatusShell>
+  )
+}
 
-              <div className="pt-4 border-t">
-                <p className="text-xs text-gray-500">
-                  ¿Tienes alguna pregunta?{" "}
-                  <a
-                    href={`mailto:${supportEmail}`}
-                    className="text-black hover:underline"
-                  >
-                    Contáctanos
-                  </a>
-                </p>
-              </div>
-            </CardContent>
-          </Card>
+function CashView({ snapshot }: { snapshot: OrderPaymentSnapshot }) {
+  return (
+    <PaymentStatusShell
+      tone="info"
+      icon={<Store className="h-8 w-8 text-neutral-700" />}
+      title="Pedido reservado para retirar"
+      description="Pagás en efectivo cuando lo retirás en la tienda."
+      summary={
+        <SummaryList
+          rows={[
+            { label: "Pedido", value: `#${orderShortId(snapshot.orderId)}` },
+            {
+              label: "Total a pagar",
+              value: formatMoney(snapshot.totalAmount, snapshot.currency),
+              strong: true,
+            },
+            { label: "Estado", value: "Reservado" },
+          ]}
+        />
+      }
+      actions={
+        <>
+          <ShellLink href="/profile/my-orders" icon={<Package />}>
+            Ver mis pedidos
+          </ShellLink>
+          <ShellLink
+            href="/products"
+            variant="secondary"
+            icon={<ShoppingBag />}
+          >
+            Seguir comprando
+          </ShellLink>
+        </>
+      }
+    >
+      <div className="flex gap-3 rounded-xl border border-neutral-200 bg-neutral-50 p-4 text-left text-sm">
+        <Store
+          className="mt-0.5 h-5 w-5 shrink-0 text-neutral-700"
+          aria-hidden="true"
+        />
+        <div>
+          <p className="font-medium text-neutral-900">Retiro en tienda</p>
+          <p className="text-neutral-600">{STORE_PICKUP_INFO}</p>
         </div>
       </div>
-    </div>
+      <ol className="space-y-2 text-left text-sm text-neutral-600">
+        <li>1. Preparamos tu pedido.</li>
+        <li>
+          2. <strong className="text-neutral-900">Te avisamos por mail</strong>{" "}
+          cuando esté listo para retirar.
+        </li>
+        <li>
+          3. Pagás el total al retirarlo. Llevá tu número de pedido.
+        </li>
+      </ol>
+    </PaymentStatusShell>
+  )
+}
+
+function MercadoPagoPendingView({
+  snapshot,
+  paymentId,
+  isPolling,
+  onRefresh,
+}: {
+  snapshot: OrderPaymentSnapshot
+  paymentId: string | null
+  isPolling: boolean
+  onRefresh: () => void
+}) {
+  const inProcess = snapshot.status === "in_process"
+  const expiresAt = formatDateTime(snapshot.expiresAt)
+  const stillValid =
+    snapshot.expiresAt !== null &&
+    new Date(snapshot.expiresAt).getTime() > Date.now()
+
+  return (
+    <PaymentStatusShell
+      tone="pending"
+      title={
+        inProcess
+          ? "Mercado Pago está revisando tu pago"
+          : "Estamos esperando que se acredite tu pago"
+      }
+      description={
+        inProcess
+          ? "Tu pago está en revisión. Suele resolverse en unos minutos y te avisamos por mail apenas se confirme."
+          : "Tu pago todavía no figura como acreditado. Apenas se confirme te mandamos un mail y empezamos a preparar tu pedido."
+      }
+      summary={
+        <PaymentOrderSummary snapshot={snapshot} paymentId={paymentId} />
+      }
+      actions={
+        <>
+          <ShellButton onClick={onRefresh} icon={<RefreshCw />}>
+            Revisar estado
+          </ShellButton>
+          <ShellLink
+            href="/profile/my-orders"
+            variant="secondary"
+            icon={<Package />}
+          >
+            Ver mis pedidos
+          </ShellLink>
+        </>
+      }
+    >
+      <ul className="space-y-2 rounded-xl border border-neutral-200 p-4 text-left text-sm text-neutral-600">
+        <li>
+          <strong className="text-neutral-900">
+            Si pagaste con tarjeta o dinero en cuenta:
+          </strong>{" "}
+          puede estar en revisión de seguridad. No hace falta que hagas nada.
+        </li>
+        <li>
+          <strong className="text-neutral-900">
+            Si elegiste Rapipago, Pago Fácil u otro pago en efectivo:
+          </strong>{" "}
+          completá el pago con el cupón que te dio Mercado Pago
+          {stillValid && expiresAt ? ` hasta el ${expiresAt}` : ""}. Después de
+          pagar, la acreditación puede demorar un rato.
+        </li>
+        <li>No pagues de nuevo: si ya lo hiciste, lo vamos a registrar igual.</li>
+      </ul>
+      {isPolling && (
+        <p className="flex items-center justify-center gap-2 text-xs text-neutral-600">
+          <Loader2
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          Esta pantalla se actualiza sola cada unos segundos.
+        </p>
+      )}
+    </PaymentStatusShell>
+  )
+}
+
+export default function PaymentPendingClient() {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+
+  const externalReference = cleanReference(
+    searchParams.get("external_reference")
+  )
+  // El `amount` de la URL no se usa: el monto real viene del servidor.
+  const urlMethod = searchParams.get("payment_method")
+  const paymentId = sanitizePaymentId(
+    searchParams.get("payment_id") ?? searchParams.get("collection_id")
+  )
+  const loginHref = buildLoginHref(
+    `${pathname}${searchParams.toString() ? `?${searchParams.toString()}` : ""}`
+  )
+
+  const { state, isPolling, refresh } = useOrderSnapshot(externalReference, {
+    shouldPoll: shouldPollPending,
+    delaysMs: POLL_DELAYS_MS,
+  })
+
+  const approvedReference =
+    state.phase === "ready" && state.snapshot.status === "approved"
+      ? externalReference
+      : null
+
+  // Pago aprobado (el admin aprobó el comprobante, entró el webhook, etc.).
+  useEffect(() => {
+    if (!approvedReference) return
+    router.replace(
+      `/payment/success?external_reference=${encodeURIComponent(approvedReference)}`
+    )
+  }, [approvedReference, router])
+
+  if (state.phase === "missing_reference") {
+    return <OrderLookupError error={null} loginHref={loginHref} />
+  }
+
+  if (state.phase === "loading") {
+    return <PaymentLoadingShell label="Cargando tu pedido…" />
+  }
+
+  if (state.phase === "error") {
+    return (
+      <OrderLookupError
+        error={state.error}
+        loginHref={loginHref}
+        onRetry={refresh}
+      />
+    )
+  }
+
+  const { snapshot } = state
+
+  if (snapshot.status === "approved") {
+    return (
+      <PaymentStatusShell
+        tone="success"
+        title="¡Pago confirmado!"
+        description="Te estamos llevando al detalle de tu pedido…"
+        actions={
+          <ShellLink
+            href={`/payment/success?external_reference=${encodeURIComponent(
+              externalReference ?? ""
+            )}`}
+          >
+            Ver mi pedido
+          </ShellLink>
+        }
+      />
+    )
+  }
+
+  const isTransfer = isBankTransferType(snapshot.paymentType ?? urlMethod)
+
+  // Transferencia rechazada: el cliente puede volver a subir comprobante.
+  if (isTransfer && snapshot.status === "rejected") {
+    return (
+      <TransferView
+        snapshot={snapshot}
+        externalReference={externalReference ?? ""}
+        onUploaded={refresh}
+      />
+    )
+  }
+
+  if (!isUnsettledPaymentStatus(snapshot.status)) {
+    return <ClosedOrderView snapshot={snapshot} paymentId={paymentId} />
+  }
+
+  if (isTransfer) {
+    return (
+      <TransferView
+        snapshot={snapshot}
+        externalReference={externalReference ?? ""}
+        onUploaded={refresh}
+      />
+    )
+  }
+
+  if (isCashStoreType(snapshot.paymentType ?? urlMethod)) {
+    return <CashView snapshot={snapshot} />
+  }
+
+  return (
+    <MercadoPagoPendingView
+      snapshot={snapshot}
+      paymentId={paymentId}
+      isPolling={isPolling}
+      onRefresh={refresh}
+    />
   )
 }

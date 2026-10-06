@@ -1,4 +1,5 @@
 import {
+  CreateSubscriberResult,
   SubscribersRepository,
   Subscriber,
 } from "@/repositories/subscribers/subscribers-repository"
@@ -15,7 +16,11 @@ export class SubscribersService {
     return await this.subscriberRepository.getAllSubscribers()
   }
 
-  async createSubscriber(email: string): Promise<void> {
+  async createSubscriber(email: string): Promise<CreateSubscriberResult> {
     return await this.subscriberRepository.createSubscriber(email)
+  }
+
+  async unsubscribe(email: string): Promise<void> {
+    return await this.subscriberRepository.deleteSubscriberByEmail(email)
   }
 }

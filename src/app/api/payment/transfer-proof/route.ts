@@ -1,14 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { PaymentService } from "@/services/payment/payment-service"
-import { AppActionException } from "@/types/exceptions"
-
-const ALLOWED_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/webp",
-  "application/pdf",
-])
+import { BaseException } from "@/exceptions/base/base-exceptions"
+import { detectFileType } from "@/lib/security/file-signature"
 
 const MAX_SIZE_BYTES = 10 * 1024 * 1024
 
@@ -46,11 +39,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (file.type && !ALLOWED_TYPES.has(file.type)) {
+    // El tipo declarado por el navegador no es confiable: se mira el contenido.
+    const header = new Uint8Array(await file.slice(0, 16).arrayBuffer())
+    if (!detectFileType(header)) {
       return NextResponse.json(
         {
           success: false,
-          message: "Formato no permitido. Subí imagen o PDF.",
+          message: "Formato no permitido. Subí una imagen (PNG, JPG, WEBP) o un PDF.",
         },
         { status: 400 }
       )
@@ -64,21 +59,16 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, data: result }, { status: 200 })
   } catch (error) {
-    if (error instanceof AppActionException) {
+    if (error instanceof BaseException) {
       return NextResponse.json(
-        {
-          success: false,
-          message: error.userMessage || error.message,
-        },
+        { success: false, message: error.userMessage },
         { status: error.statusCode || 400 }
       )
     }
 
-    const message =
-      error instanceof Error ? error.message : "Error al subir el comprobante."
     console.error("[transfer-proof:upload]", error)
     return NextResponse.json(
-      { success: false, message },
+      { success: false, message: "Error al subir el comprobante." },
       { status: 500 }
     )
   }

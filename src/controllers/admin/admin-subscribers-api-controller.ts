@@ -1,17 +1,12 @@
 import { SubscribersService } from "@/services/subscribers/subscribers-service"
-import { AuthService } from "@/services/auth/auth-service"
+import { requireAdminUser } from "@/lib/auth/session"
 import { Subscriber } from "@/repositories/subscribers/subscribers-repository"
 import { ApiResponse } from "@/types/base/types"
 
 const subscribersService = new SubscribersService()
-const authService = new AuthService()
 
 async function verifyAdminRole() {
-  const user = await authService.getUser()
-  if (user.role !== "admin") {
-    throw new Error("Solo los administradores pueden realizar esta acción")
-  }
-  return user
+  return await requireAdminUser()
 }
 
 export async function getAllSubscribersAction(): Promise<

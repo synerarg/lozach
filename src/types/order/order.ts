@@ -1,9 +1,17 @@
 import { OrderItem } from "@/types/order-items/order-items"
 import { Shipping } from "@/types/shipping/shipping"
 
+export interface OrderCustomer {
+  name: string
+  email: string
+}
+
 export interface OrderWithItems extends Order {
   order_items: OrderItem[]
   shipping?: Shipping[]
+  customer?: OrderCustomer | null
+  /** URL firmada (temporal) del comprobante, solo para admins. */
+  payment_proof_signed_url?: string | null
 }
 
 export type PaymentProofStatus = "pending_review" | "approved" | "rejected"
@@ -32,6 +40,10 @@ export interface Order {
   payment_proof_reviewed_by?: string | null
   payment_proof_rejection_reason?: string | null
   reserved_at?: string | null
+  admin_notified_at?: string | null
+  payment_status_detail?: string | null
+  cancelled_at?: string | null
+  cancellation_reason?: string | null
 }
 
 export interface CreateOrderValues {
@@ -68,4 +80,25 @@ export interface UpdateOrderValues {
   payment_proof_reviewed_by?: string | null
   payment_proof_rejection_reason?: string | null
   reserved_at?: string | null
+  admin_notified_at?: string | null
+  payment_status_detail?: string | null
+  cancelled_at?: string | null
+  cancellation_reason?: string | null
 }
+
+/** Estados de pago que puede tener una orden (collection_status). */
+export type OrderPaymentStatus =
+  | "pending"
+  | "in_process"
+  | "approved"
+  | "rejected"
+  | "cancelled"
+  | "refunded"
+  | "charged_back"
+
+/** Estados en los que la orden ya no puede volver a "approved" por error. */
+export const FINAL_PAYMENT_STATUSES: ReadonlyArray<string> = [
+  "approved",
+  "refunded",
+  "charged_back",
+]

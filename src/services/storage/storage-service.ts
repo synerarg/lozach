@@ -1,5 +1,22 @@
 import { createClient } from "@/lib/supabase/server"
+import { createClient as createAdminClient } from "@/lib/supabase/admin-client"
 import { StorageException } from "@/exceptions/storage/storage-exceptions"
+import { detectFileType } from "@/lib/security/file-signature"
+
+const PAYMENT_PROOFS_BUCKET = "payment-proofs"
+
+/** Extrae la ruta dentro del bucket desde una ruta cruda o una URL pública/firmada. */
+export function extractPaymentProofPath(pathOrUrl: string): string | null {
+  if (!/^https?:\/\//i.test(pathOrUrl)) {
+    return pathOrUrl.replace(/^\/+/, "") || null
+  }
+
+  const match = pathOrUrl.match(
+    /\/storage\/v1\/object\/(?:public|sign|authenticated)\/payment-proofs\/([^?#]+)/
+  )
+
+  return match ? decodeURIComponent(match[1]) : null
+}
 
 export class StorageService {
   async uploadProductImages(
@@ -104,19 +121,30 @@ export class StorageService {
     file: File
   ): Promise<{ proof_url: string; storage_path: string }> {
     try {
-      const supabase = await createClient()
-      const fileExt = (file.name.split(".").pop() || "bin").toLowerCase()
-      const fileName = `${Date.now()}.${fileExt}`
-      const filePath = `${orderId}/${fileName}`
+      // El bucket es privado: se sube con service role (la identidad y la
+      // pertenencia de la orden ya fueron validadas en PaymentService).
+      const supabase = createAdminClient()
 
       const arrayBuffer = await file.arrayBuffer()
       const fileBuffer = Buffer.from(arrayBuffer)
 
+      // No confiamos en file.type ni en la extensión: se detecta por contenido.
+      const detected = detectFileType(new Uint8Array(arrayBuffer.slice(0, 16)))
+
+      if (!detected) {
+        throw new StorageException(
+          "Tipo de archivo de comprobante no permitido",
+          "Formato no permitido. Subí una imagen (PNG, JPG, WEBP) o un PDF."
+        )
+      }
+
+      const filePath = `${orderId}/${Date.now()}.${detected.ext}`
+
       const { data, error } = await supabase.storage
-        .from("payment-proofs")
+        .from(PAYMENT_PROOFS_BUCKET)
         .upload(filePath, fileBuffer, {
-          upsert: true,
-          contentType: file.type || "application/octet-stream",
+          upsert: false,
+          contentType: detected.mime,
           cacheControl: "3600",
         })
 
@@ -135,12 +163,9 @@ export class StorageService {
         )
       }
 
-      const { data: publicData } = supabase.storage
-        .from("payment-proofs")
-        .getPublicUrl(data.path)
-
+      // Guardamos la RUTA (no una URL pública): se firma al mostrarla a admins.
       return {
-        proof_url: publicData.publicUrl,
+        proof_url: data.path,
         storage_path: data.path,
       }
     } catch (error) {
@@ -152,6 +177,42 @@ export class StorageService {
         "Error interno al subir comprobante",
         "Error al subir el comprobante"
       )
+    }
+  }
+
+  /**
+   * Devuelve una URL firmada temporal para ver un comprobante. Acepta tanto la
+   * ruta nueva (`<orderId>/<ts>.png`) como URLs públicas legadas del bucket.
+   */
+  async getPaymentProofSignedUrl(
+    pathOrUrl: string | null | undefined,
+    expiresInSeconds = 60 * 60
+  ): Promise<string | null> {
+    if (!pathOrUrl) {
+      return null
+    }
+
+    const path = extractPaymentProofPath(pathOrUrl)
+
+    if (!path) {
+      return null
+    }
+
+    try {
+      const supabase = createAdminClient()
+      const { data, error } = await supabase.storage
+        .from(PAYMENT_PROOFS_BUCKET)
+        .createSignedUrl(path, expiresInSeconds)
+
+      if (error || !data?.signedUrl) {
+        console.error("[StorageService] signed url error", error)
+        return null
+      }
+
+      return data.signedUrl
+    } catch (error) {
+      console.error("[StorageService] signed url error", error)
+      return null
     }
   }
 

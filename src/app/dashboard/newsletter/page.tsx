@@ -1,9 +1,13 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Mail, Calendar } from "lucide-react"
+import { CalendarPlus, Mail, UserPlus } from "lucide-react"
 import { getAllSubscribersAction } from "@/controllers/admin/admin-subscribers-api-controller"
+import { getAllProductsAction } from "@/controllers/admin/admin-products-api-controller"
 import { getUser } from "@/controllers/auth/auth-controller"
 import { redirect } from "next/navigation"
 import { AdminShell } from "@/components/dashboard/AdminShell"
+import { CampaignComposer } from "@/components/dashboard/CampaignComposer"
+import { SubscribersTableClient } from "@/components/dashboard/SubscribersTableClient"
+import { Card, CardContent } from "@/components/ui/card"
+import { formatDate, monthKey } from "@/components/dashboard/format"
 
 export default async function NewsletterPage() {
   const userResult = await getUser()
@@ -16,13 +20,51 @@ export default async function NewsletterPage() {
   }
 
   const user = userResult.data
-  const subscribersResult = await getAllSubscribersAction()
+  const [subscribersResult, productsResult] = await Promise.all([
+    getAllSubscribersAction(),
+    getAllProductsAction(),
+  ])
   const subscribers =
     subscribersResult.status === 200 && subscribersResult.data
       ? subscribersResult.data
       : []
+  const products =
+    productsResult.status === 200 && productsResult.data
+      ? productsResult.data
+      : []
 
-  const totalSubscribers = subscribers.length
+  const currentMonth = monthKey(new Date())
+  const newThisMonth = subscribers.filter(
+    (subscriber) => monthKey(subscriber.created_at) === currentMonth
+  ).length
+  const latest = subscribers.reduce<string | null>(
+    (acc, subscriber) =>
+      !acc || new Date(subscriber.created_at) > new Date(acc)
+        ? subscriber.created_at
+        : acc,
+    null
+  )
+
+  const stats = [
+    {
+      label: "Suscriptores",
+      value: String(subscribers.length),
+      hint: "Reciben tus campañas",
+      icon: Mail,
+    },
+    {
+      label: "Altas este mes",
+      value: String(newThisMonth),
+      hint: "Nuevos suscriptores del mes",
+      icon: UserPlus,
+    },
+    {
+      label: "Última alta",
+      value: latest ? formatDate(latest) : "-",
+      hint: "Fecha de registro más reciente",
+      icon: CalendarPlus,
+    },
+  ]
 
   const sidebarUser = {
     name: user.name,
@@ -32,100 +74,54 @@ export default async function NewsletterPage() {
 
   return (
     <AdminShell user={sidebarUser}>
-      <div className="flex flex-col gap-4 py-6 px-6 w-full">
-        {/* Header */}
-        <div className="flex items-center justify-between">
+      <div className="flex w-full flex-col gap-5 px-3 py-5 sm:px-6 sm:py-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Newsletter</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Armá una campaña, probala en tu mail y enviala a tus suscriptores.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {stats.map((stat, index) => (
+            <Card
+              key={stat.label}
+              className={index === 0 ? "col-span-2 sm:col-span-1" : undefined}
+            >
+              <CardContent className="p-3 sm:p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-muted-foreground sm:text-sm">
+                    {stat.label}
+                  </span>
+                  <span className="rounded-lg bg-muted p-1.5">
+                    <stat.icon className="h-4 w-4" aria-hidden="true" />
+                  </span>
+                </div>
+                <div className="mt-2 text-2xl font-bold tracking-tight tabular-nums">
+                  {stat.value}
+                </div>
+                <p className="mt-0.5 text-xs text-muted-foreground">{stat.hint}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        <section aria-labelledby="campaign-heading" className="space-y-3">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">Newsletter</h1>
-            <p className="text-gray-600">
-              Gestiona los suscriptores de tu newsletter
+            <h2 id="campaign-heading" className="text-base font-semibold">
+              Nueva campaña
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Cada mail incluye un link de baja automático.
             </p>
           </div>
-        </div>
+          <CampaignComposer
+            subscriberCount={subscribers.length}
+            products={products}
+          />
+        </section>
 
-        {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">
-                Total Suscriptores
-              </CardTitle>
-              <Mail className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{totalSubscribers}</div>
-              <p className="text-xs text-muted-foreground">
-                Todos los suscriptores
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">
-                Último suscriptor
-              </CardTitle>
-              <Calendar className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">
-                {subscribers.length > 0
-                  ? new Date(subscribers[0].created_at).toLocaleDateString(
-                      "es-AR"
-                    )
-                  : "-"}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Fecha de registro más reciente
-              </p>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Subscribers Table */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Lista de Suscriptores</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left p-2">Email</th>
-                    <th className="text-left p-2">Fecha de registro</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {subscribers.map((subscriber) => (
-                    <tr key={subscriber.id} className="border-b">
-                      <td className="p-2">
-                        <span className="font-medium">{subscriber.email}</span>
-                      </td>
-                      <td className="p-2">
-                        <div className="flex items-center gap-1">
-                          <Calendar className="h-3 w-3 text-muted-foreground" />
-                          <span className="text-sm">
-                            {new Date(subscriber.created_at).toLocaleDateString(
-                              "es-AR"
-                            )}
-                          </span>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {subscribers.length === 0 && (
-              <div className="text-center py-8">
-                <Mail className="h-12 w-12 mx-auto text-gray-400 mb-4" />
-                <p className="text-gray-500">No hay suscriptores registrados</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+        <SubscribersTableClient subscribers={subscribers} />
       </div>
     </AdminShell>
   )

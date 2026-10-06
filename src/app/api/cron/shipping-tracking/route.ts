@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { timingSafeEqual } from "crypto"
 import { ShipmentTrackingService } from "@/services/shipping/shipment-tracking-service"
 
 export const dynamic = "force-dynamic"
@@ -15,8 +16,11 @@ function isAuthorized(request: NextRequest): boolean {
   }
 
   // Vercel Cron envía automáticamente `Authorization: Bearer <CRON_SECRET>`.
-  const authHeader = request.headers.get("authorization")
-  return authHeader === `Bearer ${secret}`
+  const expected = Buffer.from(`Bearer ${secret}`)
+  const received = Buffer.from(request.headers.get("authorization") ?? "")
+  return (
+    expected.length === received.length && timingSafeEqual(expected, received)
+  )
 }
 
 async function handle(request: NextRequest) {
@@ -40,6 +44,3 @@ export async function GET(request: NextRequest) {
   return handle(request)
 }
 
-export async function POST(request: NextRequest) {
-  return handle(request)
-}

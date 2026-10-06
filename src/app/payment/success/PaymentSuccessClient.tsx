@@ -1,189 +1,326 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { useSearchParams } from "next/navigation"
-import Link from "next/link"
-import { CheckCircle, Package, Home, Loader2, AlertCircle } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useEffect, useRef } from "react"
+import { usePathname, useSearchParams } from "next/navigation"
+import {
+  Mail,
+  Package,
+  RefreshCw,
+  ShoppingBag,
+  Store,
+  Truck,
+} from "lucide-react"
+
+import type { OrderPaymentSnapshot } from "@/controllers/payment/payment-controller"
 import { useCart } from "@/context/CartContext"
-import { verifyPaymentStatus } from "@/controllers/payment/payment-controller"
+import { orderShortId, STORE_PICKUP_INFO } from "@/lib/config/site"
+import {
+  buildLoginHref,
+  buildPendingHref,
+  cleanReference,
+  isBankTransferType,
+  isCashStoreType,
+  isMercadoPagoType,
+  isStorePickupMethod,
+  isUnsettledPaymentStatus,
+  sanitizePaymentId,
+} from "@/components/payment/payment-format"
+import { ClosedOrderView } from "@/components/payment/ClosedOrderView"
+import { OrderLookupError } from "@/components/payment/OrderLookupError"
+import { PaymentOrderSummary } from "@/components/payment/PaymentOrderSummary"
+import {
+  PaymentLoadingShell,
+  PaymentStatusShell,
+  ShellButton,
+  ShellLink,
+} from "@/components/payment/PaymentStatusShell"
+import { useOrderSnapshot } from "@/components/payment/useOrderSnapshot"
+
+/** ~30 s de polling con backoff: el webhook de Mercado Pago puede tardar unos segundos. */
+const POLL_DELAYS_MS: readonly number[] = [
+  2000, 2000, 2500, 2500, 3000, 3000, 3000, 3000, 3000, 3000, 3000,
+]
+
+function shouldPollSuccess(snapshot: OrderPaymentSnapshot): boolean {
+  // Transferencia / efectivo no se resuelven solos desde esta pantalla.
+  return (
+    isUnsettledPaymentStatus(snapshot.status) &&
+    isMercadoPagoType(snapshot.paymentType)
+  )
+}
+
+const CART_CLEARED_KEY_PREFIX = "lozach:cart-cleared:"
+
+/** true si ya limpiamos el carrito para esta orden (evita vaciar un carrito nuevo al recargar). */
+function markCartCleared(orderId: string): boolean {
+  const key = `${CART_CLEARED_KEY_PREFIX}${orderId}`
+  try {
+    if (window.localStorage.getItem(key)) return false
+    window.localStorage.setItem(key, "1")
+  } catch {
+    // Sin storage: limpiamos igual (una vez por montaje).
+  }
+  return true
+}
+
+function NextSteps({ snapshot }: { snapshot: OrderPaymentSnapshot }) {
+  const pickup = isStorePickupMethod(snapshot.shippingMethod)
+
+  const steps: { icon: React.ReactNode; title: string; body: React.ReactNode }[] = [
+    {
+      icon: <Mail className="h-5 w-5" aria-hidden="true" />,
+      title: "Revisá tu mail",
+      body: "Te enviamos la confirmación con el detalle de tu pedido. Si no llega en unos minutos, mirá la carpeta de spam.",
+    },
+    pickup
+      ? {
+          icon: <Store className="h-5 w-5" aria-hidden="true" />,
+          title: "Retirás en la tienda",
+          body: (
+            <>
+              Preparamos tu pedido y te avisamos por mail cuando esté listo.{" "}
+              {STORE_PICKUP_INFO}
+            </>
+          ),
+        }
+      : {
+          icon: <Truck className="h-5 w-5" aria-hidden="true" />,
+          title: "Lo despachamos con Correo Argentino",
+          body: snapshot.trackingNumber ? (
+            <>
+              Tu número de seguimiento es{" "}
+              <span className="font-mono font-medium">
+                {snapshot.trackingNumber}
+              </span>
+              .
+            </>
+          ) : (
+            "Preparamos tu pedido y te mandamos el número de seguimiento por mail apenas se despache."
+          ),
+        },
+    {
+      icon: <Package className="h-5 w-5" aria-hidden="true" />,
+      title: "Seguilo en Mis pedidos",
+      body: "Ahí ves el estado de tu pedido paso a paso, cuando quieras.",
+    },
+  ]
+
+  return (
+    <section aria-labelledby="next-steps-title">
+      <h2
+        id="next-steps-title"
+        className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-600"
+      >
+        Qué sigue
+      </h2>
+      <ol className="space-y-3">
+        {steps.map((step) => (
+          <li
+            key={step.title}
+            className="flex gap-3 rounded-xl border border-neutral-200 p-3"
+          >
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800">
+              {step.icon}
+            </span>
+            <div className="min-w-0 text-left">
+              <p className="text-sm font-medium text-neutral-900">
+                {step.title}
+              </p>
+              <p className="text-sm text-neutral-600">{step.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
 
 export default function PaymentSuccessClient() {
   const searchParams = useSearchParams()
+  const pathname = usePathname()
   const { clearCart } = useCart()
-  const [isVerifying, setIsVerifying] = useState(true)
-  const [isApproved, setIsApproved] = useState(false)
-  const [paymentId, setPaymentId] = useState<string | null>(null)
 
+  const externalReference = cleanReference(
+    searchParams.get("external_reference")
+  )
+  const paymentId = sanitizePaymentId(
+    searchParams.get("payment_id") ?? searchParams.get("collection_id")
+  )
+  const loginHref = buildLoginHref(
+    `${pathname}${searchParams.toString() ? `?${searchParams.toString()}` : ""}`
+  )
+
+  const { state, isPolling, exhausted, refresh } = useOrderSnapshot(
+    externalReference,
+    { shouldPoll: shouldPollSuccess, delaysMs: POLL_DELAYS_MS }
+  )
+
+  const snapshot = state.phase === "ready" ? state.snapshot : null
+  const approvedOrderId =
+    snapshot?.status === "approved" ? snapshot.orderId : null
+  const clearedRef = useRef(false)
+
+  // El carrito se limpia UNA sola vez, recién cuando el pago está aprobado.
   useEffect(() => {
-    const externalReference = searchParams.get("external_reference")
-    const id = searchParams.get("payment_id")
-    setPaymentId(id)
+    if (!approvedOrderId || clearedRef.current) return
+    clearedRef.current = true
+    if (markCartCleared(approvedOrderId)) {
+      clearCart()
+    }
+    // clearCart cambia de identidad en cada render del provider.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approvedOrderId])
 
-    if (!externalReference) {
-      setIsVerifying(false)
-      return
+  if (state.phase === "missing_reference") {
+    return <OrderLookupError error={null} loginHref={loginHref} />
+  }
+
+  if (state.phase === "loading") {
+    return <PaymentLoadingShell label="Verificando tu pago…" />
+  }
+
+  if (state.phase === "error") {
+    return (
+      <OrderLookupError
+        error={state.error}
+        loginHref={loginHref}
+        onRetry={refresh}
+      />
+    )
+  }
+
+  const { snapshot: order } = state
+  const shortId = orderShortId(order.orderId)
+
+  // --- Aprobado -----------------------------------------------------------
+  if (order.status === "approved") {
+    const pickup = isStorePickupMethod(order.shippingMethod)
+
+    return (
+      <PaymentStatusShell
+        tone="success"
+        title="¡Pago confirmado!"
+        description={
+          <>
+            Gracias por tu compra. Tu pedido <strong>#{shortId}</strong> ya está
+            confirmado
+            {pickup ? " y lo vas a retirar en la tienda." : "."}
+          </>
+        }
+        announce={`Pago confirmado. Tu pedido ${shortId} ya está confirmado.`}
+        size="lg"
+        summary={<PaymentOrderSummary snapshot={order} paymentId={paymentId} />}
+        actions={
+          <>
+            <ShellLink href="/profile/my-orders" icon={<Package />}>
+              Ver mis pedidos
+            </ShellLink>
+            <ShellLink
+              href="/products"
+              variant="secondary"
+              icon={<ShoppingBag />}
+            >
+              Seguir comprando
+            </ShellLink>
+          </>
+        }
+      >
+        <NextSteps snapshot={order} />
+      </PaymentStatusShell>
+    )
+  }
+
+  // --- Pedido que se paga por transferencia / efectivo (no es de MP) ------
+  if (
+    isUnsettledPaymentStatus(order.status) &&
+    (isBankTransferType(order.paymentType) || isCashStoreType(order.paymentType))
+  ) {
+    const method = order.paymentType ?? ""
+    const isTransfer = isBankTransferType(order.paymentType)
+
+    return (
+      <PaymentStatusShell
+        tone="pending"
+        title={
+          isTransfer ? "Tu pedido espera la transferencia" : "Pedido reservado"
+        }
+        description={
+          isTransfer
+            ? "Todavía no confirmamos el pago de este pedido. Mirá los datos para transferir y subí el comprobante."
+            : "Pagás en efectivo cuando retirás tu pedido en la tienda."
+        }
+        summary={<PaymentOrderSummary snapshot={order} />}
+        actions={
+          <>
+            <ShellLink
+              href={
+                externalReference
+                  ? buildPendingHref(externalReference, method)
+                  : "/profile/my-orders"
+              }
+            >
+              {isTransfer ? "Ver datos de la transferencia" : "Ver mi reserva"}
+            </ShellLink>
+            <ShellLink
+              href="/profile/my-orders"
+              variant="secondary"
+              icon={<Package />}
+            >
+              Ver mis pedidos
+            </ShellLink>
+          </>
+        }
+      />
+    )
+  }
+
+  // --- Confirmando / todavía procesando (pending / in_process) -------------
+  if (isUnsettledPaymentStatus(order.status)) {
+    if (isPolling || !exhausted) {
+      return (
+        <PaymentStatusShell
+          tone="loading"
+          title="Estamos confirmando tu pago"
+          description="Mercado Pago nos está avisando que se acreditó. Suele tardar unos segundos, no cierres esta pantalla."
+          announce="Estamos confirmando tu pago. Esto puede tardar unos segundos."
+          summary={
+            <PaymentOrderSummary snapshot={order} paymentId={paymentId} />
+          }
+          hideSupport
+        />
+      )
     }
 
-    verifyPaymentStatus(externalReference)
-      .then((result) => {
-        if (result.success && result.data?.status === "approved") {
-          setIsApproved(true)
-          clearCart()
+    return (
+      <PaymentStatusShell
+        tone="pending"
+        title="Todavía estamos procesando tu pago"
+        description={
+          <>
+            Algunos pagos tardan unos minutos en acreditarse. No hace falta que
+            pagues de nuevo: apenas se confirme te mandamos un mail y vas a ver
+            tu pedido actualizado en Mis pedidos.
+          </>
         }
-      })
-      .catch(() => {
-        // Verification failed — show unverified state
-      })
-      .finally(() => {
-        setIsVerifying(false)
-      })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams])
-
-  if (isVerifying) {
-    return (
-      <div className="min-h-screen py-24 flex items-center justify-center bg-gray-50">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="h-8 w-8 animate-spin text-gray-600" />
-          <p className="text-gray-600">Verificando tu pago...</p>
-        </div>
-      </div>
+        summary={<PaymentOrderSummary snapshot={order} paymentId={paymentId} />}
+        actions={
+          <>
+            <ShellButton onClick={refresh} icon={<RefreshCw />}>
+              Revisar de nuevo
+            </ShellButton>
+            <ShellLink
+              href="/profile/my-orders"
+              variant="secondary"
+              icon={<Package />}
+            >
+              Ver mis pedidos
+            </ShellLink>
+          </>
+        }
+      />
     )
   }
 
-  if (!isApproved) {
-    return (
-      <div className="min-h-screen py-24 flex items-center justify-center bg-gray-50">
-        <div className="container mx-auto px-4">
-          <div className="max-w-md mx-auto">
-            <Card className="text-center">
-              <CardHeader className="pb-4">
-                <div className="w-16 h-16 mx-auto mb-4 bg-amber-100 rounded-full flex items-center justify-center">
-                  <AlertCircle className="h-8 w-8 text-amber-600" />
-                </div>
-                <CardTitle className="text-2xl font-bold text-gray-900">
-                  Pago en proceso
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="space-y-2">
-                  <p className="text-gray-600">
-                    Tu pago aún no ha sido confirmado. Esto puede tardar unos
-                    minutos.
-                  </p>
-                  {paymentId && (
-                    <p className="text-sm text-gray-500">
-                      ID de pago:{" "}
-                      <span className="font-mono">{paymentId}</span>
-                    </p>
-                  )}
-                  <p className="text-gray-600">
-                    Podés revisar el estado de tu pedido en &quot;Mis
-                    Pedidos&quot;.
-                  </p>
-                </div>
-
-                <div className="space-y-3">
-                  <Button
-                    asChild
-                    className="w-full bg-black hover:bg-black/90 text-white"
-                  >
-                    <Link href="/profile/my-orders">
-                      <Package className="h-4 w-4 mr-2" />
-                      Ver Mis Pedidos
-                    </Link>
-                  </Button>
-                  <Button asChild variant="outline" className="w-full">
-                    <Link href="/">
-                      <Home className="h-4 w-4 mr-2" />
-                      Volver al Inicio
-                    </Link>
-                  </Button>
-                </div>
-
-                <div className="pt-4 border-t">
-                  <p className="text-xs text-gray-500">
-                    ¿Tienes alguna pregunta?{" "}
-                    <a
-                      href="mailto:lozacharg@gmail.com"
-                      className="text-black hover:underline"
-                    >
-                      Contáctanos
-                    </a>
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="min-h-screen py-24 flex items-center justify-center bg-gray-50">
-      <div className="container mx-auto px-4">
-        <div className="max-w-md mx-auto">
-          <Card className="text-center">
-            <CardHeader className="pb-4">
-              <div className="w-16 h-16 mx-auto mb-4 bg-green-100 rounded-full flex items-center justify-center">
-                <CheckCircle className="h-8 w-8 text-green-600" />
-              </div>
-              <CardTitle className="text-2xl font-bold text-gray-900">
-                ¡Pago Exitoso!
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="space-y-2">
-                <p className="text-gray-600">
-                  Tu pago ha sido procesado correctamente.
-                </p>
-                {paymentId && (
-                  <p className="text-sm text-gray-500">
-                    ID de pago: <span className="font-mono">{paymentId}</span>
-                  </p>
-                )}
-                <p className="text-gray-600">
-                  Recibirás un email de confirmación con los detalles de tu
-                  pedido.
-                </p>
-              </div>
-
-              <div className="space-y-3">
-                <Button
-                  asChild
-                  className="w-full bg-black hover:bg-black/90 text-white"
-                >
-                  <Link href="/profile/my-orders">
-                    <Package className="h-4 w-4 mr-2" />
-                    Ver Mis Pedidos
-                  </Link>
-                </Button>
-                <Button asChild variant="outline" className="w-full">
-                  <Link href="/">
-                    <Home className="h-4 w-4 mr-2" />
-                    Volver al Inicio
-                  </Link>
-                </Button>
-              </div>
-
-              <div className="pt-4 border-t">
-                <p className="text-xs text-gray-500">
-                  ¿Tienes alguna pregunta?{" "}
-                  <a
-                    href="mailto:lozacharg@gmail.com"
-                    className="text-black hover:underline"
-                  >
-                    Contáctanos
-                  </a>
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    </div>
-  )
+  // --- Rechazado / reembolsado / cancelado / vencido -------------------------
+  return <ClosedOrderView snapshot={order} paymentId={paymentId} />
 }

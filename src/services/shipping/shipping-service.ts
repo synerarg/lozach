@@ -28,6 +28,10 @@ export class ShippingService {
     return await this.shippingRepository.findShipmentsToSync(limit)
   }
 
+  async findShipmentsPendingImport(limit?: number): Promise<Shipping[]> {
+    return await this.shippingRepository.findShipmentsPendingImport(limit)
+  }
+
   async updateShipping(
     orderId: string,
     shipping: UpdateShippingValues

@@ -4,7 +4,9 @@ export const CASH_STORE_PAYMENT_TYPE = "cash_store"
 export const BANK_TRANSFER_DISCOUNT_RATE = 0.1
 export const CASH_STORE_DISCOUNT_RATE = 0.2
 
-export const TRANSFER_PAYMENT_WINDOW_MS = 20 * 60 * 1000
+/** Tiempo que tiene el cliente para transferir y subir el comprobante (configurable). */
+export const TRANSFER_PAYMENT_WINDOW_MS =
+  (Number(process.env.NEXT_PUBLIC_TRANSFER_WINDOW_MINUTES) || 60) * 60 * 1000
 
 export const BANK_TRANSFER_DISCOUNT_PERCENT_LABEL = `${Math.round(
   BANK_TRANSFER_DISCOUNT_RATE * 100

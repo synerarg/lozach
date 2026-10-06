@@ -1,17 +1,12 @@
 import { OrderService } from "@/services/orders/order-service"
-import { AuthService } from "@/services/auth/auth-service"
+import { requireAdminUser } from "@/lib/auth/session"
 import { OrderWithItems } from "@/types/order/order"
 import { ApiResponse } from "@/types/base/types"
 
 const orderService = new OrderService()
-const authService = new AuthService()
 
 async function verifyAdminRole() {
-  const user = await authService.getUser()
-  if (user.role !== "admin") {
-    throw new Error("Solo los administradores pueden realizar esta acción")
-  }
-  return user
+  return await requireAdminUser()
 }
 
 export async function getAllOrdersAction(): Promise<ApiResponse<OrderWithItems[]>> {

@@ -101,4 +101,31 @@ export class ShippingRepository {
 
     return
   }
+
+  /** Envíos por Correo Argentino ya cobrados que todavía no se importaron a MiCorreo. */
+  async findShipmentsPendingImport(
+    limit = 20,
+    maxAttempts = 8
+  ): Promise<Shipping[]> {
+    const supabase = createAdminClient()
+
+    const { data, error } = await supabase
+      .from("shipping")
+      .select("*")
+      .is("imported_at", null)
+      .eq("shipping_status", "ready")
+      .neq("shipping_method", "store")
+      .lt("import_attempts", maxAttempts)
+      .order("created_at", { ascending: true })
+      .limit(limit)
+
+    if (error) {
+      throw new ShippingFetchException(
+        error.message,
+        "Error al obtener los envíos pendientes de importar"
+      )
+    }
+
+    return data ? (data as Shipping[]) : []
+  }
 }
