@@ -135,7 +135,12 @@ const ServerMyOrders = async () => {
 
   const productIds = Array.from(
     new Set(
-      details.flatMap(({ items }) => (items ?? []).map((item) => item.product_id))
+      details.flatMap(({ items }) =>
+        (items ?? [])
+          .map((item) => item.product_id)
+          // product_id queda en null si el producto se eliminó del catálogo
+          .filter((id): id is number => typeof id === "number")
+      )
     )
   )
   const products = await loadProducts(productIds)
@@ -144,7 +149,10 @@ const ServerMyOrders = async () => {
     order: toCustomerOrder(order),
     items: (items ?? []).map((orderItem) => ({
       orderItem,
-      product: products.get(orderItem.product_id) ?? null,
+      product:
+        orderItem.product_id != null
+          ? (products.get(orderItem.product_id) ?? null)
+          : null,
     })),
     itemsError: items === null,
     shipping: shipping ? toCustomerShipping(shipping) : null,

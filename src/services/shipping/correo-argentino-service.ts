@@ -248,7 +248,7 @@ export class CorreoArgentinoService {
     const recipientAddress = splitStreetAddress(params.shipping.address)
     const { weight, height, width, length } = await this.getPackageDimensions(
       params.orderItems.map((item) => ({
-        id: item.product_id,
+        id: item.product_id ?? undefined,
         quantity: item.quantity,
       }))
     )

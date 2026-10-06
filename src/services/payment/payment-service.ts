@@ -727,7 +727,12 @@ export class PaymentService {
     }
 
     const productIds = Array.from(
-      new Set(orderItems.map((item) => item.product_id))
+      new Set(
+        orderItems
+          .map((item) => item.product_id)
+          // null si el producto se eliminó del catálogo (el ítem conserva nombre y precio)
+          .filter((id): id is number => typeof id === "number")
+      )
     )
     const buyedProducts = [] as Product[]
 
