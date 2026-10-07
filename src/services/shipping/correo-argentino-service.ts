@@ -467,18 +467,26 @@ export class CorreoArgentinoService {
   private assertImportConfiguration(): void {
     const sender = this.getSenderConfig()
 
-    if (
-      !this.username ||
-      !this.password ||
-      !this.customerId ||
-      !sender.street ||
-      !sender.streetNumber ||
-      !sender.city ||
-      !sender.provinceCode ||
-      !sender.zipCode
-    ) {
+    // Nombra exactamente qué falta (antes el error era genérico y no decía cuál).
+    const missing: string[] = []
+    if (!this.username) missing.push("CORREO_ARGENTINO_USER")
+    if (!this.password) missing.push("CORREO_ARGENTINO_PASSWORD")
+    if (!this.customerId) missing.push("CORREO_ARGENTINO_CUSTOMER_ID")
+    if (!sender.street) missing.push("CORREO_ARGENTINO_SENDER_STREET")
+    if (!sender.streetNumber) missing.push("CORREO_ARGENTINO_SENDER_STREET_NUMBER")
+    if (!sender.city) missing.push("CORREO_ARGENTINO_SENDER_CITY")
+    if (!sender.zipCode) missing.push("CORREO_ARGENTINO_SENDER_ZIP_CODE")
+    if (!sender.provinceCode) {
+      missing.push(
+        process.env.CORREO_ARGENTINO_SENDER_STATE
+          ? `CORREO_ARGENTINO_SENDER_STATE (valor "${process.env.CORREO_ARGENTINO_SENDER_STATE}" no es una provincia válida)`
+          : "CORREO_ARGENTINO_SENDER_STATE"
+      )
+    }
+
+    if (missing.length > 0) {
       throw new Error(
-        "Falta configurar Correo Argentino completo. Revisá customerId y remitente."
+        `Falta configurar Correo Argentino. Variables faltantes o inválidas en Vercel: ${missing.join(", ")}.`
       )
     }
   }
